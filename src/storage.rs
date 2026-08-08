@@ -24,6 +24,7 @@ struct PersonaConfigFile {
 #[derive(Debug, Clone)]
 pub struct StoredBrief {
     pub date: NaiveDate,
+    pub headline: String,
     pub brief: String,
     pub articles: Vec<Article>,
     pub stats: BriefStats,
@@ -70,6 +71,7 @@ impl Storage {
                 CREATE TABLE briefs (
                     date         TEXT NOT NULL,
                     persona_id   INTEGER NOT NULL DEFAULT 1,
+                    headline     TEXT NOT NULL DEFAULT '',
                     brief_text   TEXT NOT NULL,
                     articles_json TEXT NOT NULL,
                     feeds_fetched INTEGER NOT NULL,
@@ -79,11 +81,26 @@ impl Storage {
                     created_at   TEXT NOT NULL,
                     PRIMARY KEY (date, persona_id)
                 );
-                INSERT INTO briefs (date, persona_id, brief_text, articles_json, feeds_fetched, total_articles, articles_kept, model, created_at)
-                SELECT date, 1, brief_text, articles_json, feeds_fetched, total_articles, articles_kept, model, created_at FROM briefs_old;
+                INSERT INTO briefs (date, persona_id, headline, brief_text, articles_json, feeds_fetched, total_articles, articles_kept, model, created_at)
+                SELECT date, 1, '', brief_text, articles_json, feeds_fetched, total_articles, articles_kept, model, created_at FROM briefs_old;
                 DROP TABLE briefs_old;
             "#)?;
             tx.commit()?;
+        }
+
+        let has_headline: bool = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('briefs') WHERE name='headline'",
+                [],
+                |r| Ok(r.get::<_, i64>(0)? > 0),
+            )
+            .unwrap_or(false);
+
+        if table_exists && has_persona_id && !has_headline {
+            conn.execute(
+                "ALTER TABLE briefs ADD COLUMN headline TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
         }
 
         conn.execute_batch(
@@ -98,6 +115,7 @@ impl Storage {
             CREATE TABLE IF NOT EXISTS briefs (
                 date         TEXT NOT NULL,
                 persona_id   INTEGER NOT NULL DEFAULT 1,
+                headline     TEXT NOT NULL DEFAULT '',
                 brief_text   TEXT NOT NULL,
                 articles_json TEXT NOT NULL,
                 feeds_fetched INTEGER NOT NULL,
@@ -258,6 +276,7 @@ impl Storage {
         &self,
         date: NaiveDate,
         persona_id: i64,
+        headline: &str,
         brief: &str,
         articles: &[Article],
         stats: &BriefStats,
@@ -266,11 +285,12 @@ impl Storage {
         let articles_json = serde_json::to_string(articles)?;
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT OR REPLACE INTO briefs (date, persona_id, brief_text, articles_json, feeds_fetched, total_articles, articles_kept, model, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO briefs (date, persona_id, headline, brief_text, articles_json, feeds_fetched, total_articles, articles_kept, model, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 date.format("%Y-%m-%d").to_string(),
                 persona_id,
+                headline,
                 brief,
                 articles_json,
                 stats.feeds_fetched as i64,
@@ -285,25 +305,27 @@ impl Storage {
 
     pub fn load(&self, date: NaiveDate, persona_id: i64) -> Result<Option<StoredBrief>> {
         let mut stmt = self.conn.prepare(
-            "SELECT date, brief_text, articles_json, feeds_fetched, total_articles, articles_kept, model, created_at, persona_id
+            "SELECT date, headline, brief_text, articles_json, feeds_fetched, total_articles, articles_kept, model, created_at, persona_id
              FROM briefs WHERE date = ? AND persona_id = ?",
         )?;
         let mut rows = stmt.query(params![date.format("%Y-%m-%d").to_string(), persona_id])?;
         if let Some(row) = rows.next()? {
             let date_str: String = row.get(0)?;
-            let brief: String = row.get(1)?;
-            let articles_json: String = row.get(2)?;
+            let headline: String = row.get(1)?;
+            let brief: String = row.get(2)?;
+            let articles_json: String = row.get(3)?;
             let stats = BriefStats {
-                feeds_fetched: row.get::<_, i64>(3)? as usize,
-                total_articles: row.get::<_, i64>(4)? as usize,
-                articles_kept: row.get::<_, i64>(5)? as usize,
+                feeds_fetched: row.get::<_, i64>(4)? as usize,
+                total_articles: row.get::<_, i64>(5)? as usize,
+                articles_kept: row.get::<_, i64>(6)? as usize,
             };
-            let model: String = row.get(6)?;
-            let created_at_str: String = row.get(7)?;
-            let persona_id: i64 = row.get(8)?;
+            let model: String = row.get(7)?;
+            let created_at_str: String = row.get(8)?;
+            let persona_id: i64 = row.get(9)?;
             let articles: Vec<Article> = serde_json::from_str(&articles_json)?;
             Ok(Some(StoredBrief {
                 date: NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")?,
+                headline,
                 brief,
                 articles,
                 stats,

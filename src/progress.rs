@@ -8,6 +8,7 @@ pub enum ProgressEvent {
         percent: u8,
     },
     Done {
+        headline: String,
         brief: String,
         articles: Vec<Article>,
         stats: BriefStats,

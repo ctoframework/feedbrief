@@ -29,6 +29,24 @@ enum View {
     Results,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishDigestPayload {
+    pub date: String,
+    pub headline: String,
+    pub executive_brief: String,
+    pub tags: Vec<String>,
+    pub content: String,
+    pub sources: Vec<PublishSource>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PublishSource {
+    pub title: String,
+    pub url: String,
+    pub description: String,
+}
+
 pub struct FeedbriefApp {
     runtime: Arc<tokio::runtime::Runtime>,
     storage: Storage,
@@ -60,11 +78,19 @@ pub struct FeedbriefApp {
     ollama_check_rx: Option<tokio::sync::oneshot::Receiver<bool>>,
 
     available_dates: Vec<NaiveDate>,
+
+    publish_endpoint: String,
+    publish_token: String,
+    publish_settings_open: bool,
+    publish_in_progress: bool,
+    publish_result_msg: Option<(bool, String)>,
+    publish_rx: Option<tokio::sync::oneshot::Receiver<Result<String, String>>>,
 }
 
 #[derive(Clone)]
 struct DisplayedBrief {
     date: NaiveDate,
+    headline: String,
     brief: String,
     articles: Vec<Article>,
     stats: BriefStats,
@@ -73,8 +99,14 @@ struct DisplayedBrief {
 
 impl DisplayedBrief {
     fn from_stored(s: StoredBrief) -> Self {
+        let headline = if s.headline.is_empty() {
+            "Daily Intelligence Briefing".to_string()
+        } else {
+            s.headline
+        };
         Self {
             date: s.date,
+            headline,
             brief: s.brief,
             articles: s.articles,
             stats: s.stats,
@@ -141,6 +173,12 @@ impl FeedbriefApp {
             last_ollama_check: std::time::Instant::now() - std::time::Duration::from_secs(60),
             ollama_check_rx: None,
             available_dates,
+            publish_endpoint: "http://localhost:3000/api/news-digest".to_string(),
+            publish_token: "YOUR_SECRET_KEY".to_string(),
+            publish_settings_open: false,
+            publish_in_progress: false,
+            publish_result_msg: None,
+            publish_rx: None,
         }
     }
 
@@ -184,6 +222,7 @@ impl FeedbriefApp {
                             .push(format!("[{}] {}", stage, message));
                     }
                     ProgressEvent::Done {
+                        headline,
                         brief,
                         articles,
                         stats,
@@ -193,6 +232,7 @@ impl FeedbriefApp {
                         let _ = self.storage.save(
                             today,
                             persona_id,
+                            &headline,
                             &brief,
                             &articles,
                             &stats,
@@ -202,6 +242,7 @@ impl FeedbriefApp {
                             self.storage.all_dates(persona_id).unwrap_or_default();
                         self.current_brief = Some(DisplayedBrief {
                             date: today,
+                            headline,
                             brief,
                             articles,
                             stats,
@@ -265,6 +306,7 @@ impl eframe::App for FeedbriefApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_progress(ctx);
         self.poll_ollama();
+        self.poll_publish();
 
         egui::CentralPanel::default()
             .frame(
@@ -765,6 +807,177 @@ impl FeedbriefApp {
         ui.add_space(60.0);
     }
 
+    fn poll_publish(&mut self) {
+        if let Some(rx) = self.publish_rx.as_mut() {
+            if let Ok(res) = rx.try_recv() {
+                self.publish_in_progress = false;
+                match res {
+                    Ok(msg) => self.publish_result_msg = Some((false, msg)),
+                    Err(err) => self.publish_result_msg = Some((true, err)),
+                }
+                self.publish_rx = None;
+            }
+        }
+    }
+
+    fn start_publish(&mut self, brief: &DisplayedBrief) {
+        let date_str = format!("{}T10:00:00.000Z", brief.date.format("%Y-%m-%d"));
+        let mut tags: Vec<String> = brief
+            .articles
+            .iter()
+            .filter_map(|a| a.topic_tag.clone())
+            .map(|t| t.to_lowercase())
+            .collect();
+        tags.sort();
+        tags.dedup();
+        if tags.is_empty() {
+            tags.push("news".to_string());
+        }
+
+        let mut content = String::new();
+        content.push_str("### Executive Briefing\n\n");
+        content.push_str(&brief.brief);
+        content.push_str("\n\n### Key Stories\n\n");
+        for a in &brief.articles {
+            content.push_str(&format!("#### [{}]({})\n", a.title, a.url));
+
+            let summary = a.ai_summary.as_deref().unwrap_or(&a.summary);
+            content.push_str(summary);
+            content.push_str("\n\n");
+        }
+
+        let sources = brief
+            .articles
+            .iter()
+            .map(|a| PublishSource {
+                title: a.title.clone(),
+                url: a.url.clone(),
+                description: a.ai_summary.clone().unwrap_or_else(|| a.summary.clone()),
+            })
+            .collect();
+
+        let payload = PublishDigestPayload {
+            date: date_str,
+            headline: brief.headline.clone(),
+            executive_brief: brief.brief.clone(),
+            tags,
+            content,
+            sources,
+        };
+
+        let endpoint = self.publish_endpoint.clone();
+        let token = self.publish_token.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.publish_rx = Some(rx);
+        self.publish_in_progress = true;
+        self.publish_result_msg = None;
+
+        self.runtime.spawn(async move {
+            let res = do_publish_http(&endpoint, &token, &payload).await;
+            let _ = tx.send(res);
+        });
+    }
+
+    fn draw_publish_bar(&mut self, ui: &mut egui::Ui, brief: &DisplayedBrief) {
+        egui::Frame::none()
+            .fill(BG_RAISED)
+            .inner_margin(egui::Margin::same(16.0))
+            .stroke(Stroke::new(1.0, RULE))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(overline("PUBLISH DIGEST TO REMOTE"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let settings_text = if self.publish_settings_open {
+                            "Hide Config ⚙"
+                        } else {
+                            "Configure Endpoint ⚙"
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(settings_text)
+                                        .font(FontId::new(9.5, FontFamily::Monospace))
+                                        .color(INK_FAINT),
+                                )
+                                .fill(Color32::TRANSPARENT),
+                            )
+                            .clicked()
+                        {
+                            self.publish_settings_open = !self.publish_settings_open;
+                        }
+                    });
+                });
+
+                if self.publish_settings_open {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("ENDPOINT URL")
+                                    .font(FontId::new(9.0, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                            ui.text_edit_singleline(&mut self.publish_endpoint);
+                        });
+                        ui.add_space(16.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("BEARER TOKEN")
+                                    .font(FontId::new(9.0, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                            ui.text_edit_singleline(&mut self.publish_token);
+                        });
+                    });
+                    ui.add_space(6.0);
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if self.publish_in_progress {
+                        ui.add(egui::Spinner::new());
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("Pushing digest payload via HTTP POST...")
+                                .font(FontId::new(12.0, FontFamily::Monospace))
+                                .color(GOLD),
+                        );
+                    } else {
+                        let pub_btn = ui.add(
+                            egui::Button::new(
+                                RichText::new("🚀  PUBLISH DIGEST")
+                                    .font(FontId::new(11.0, FontFamily::Monospace))
+                                    .color(BG),
+                            )
+                            .fill(GOLD)
+                            .min_size(Vec2::new(160.0, 34.0)),
+                        );
+
+                        if pub_btn.clicked() {
+                            self.start_publish(brief);
+                        }
+
+                        ui.add_space(12.0);
+                        ui.label(
+                            RichText::new(format!("Target: {}", self.publish_endpoint))
+                                .font(FontId::new(10.0, FontFamily::Monospace))
+                                .color(INK_FAINT),
+                        );
+                    }
+                });
+
+                if let Some((is_err, ref msg)) = self.publish_result_msg {
+                    ui.add_space(8.0);
+                    let color = if is_err { ACCENT } else { GREEN };
+                    ui.label(
+                        RichText::new(msg)
+                            .font(FontId::new(11.0, FontFamily::Monospace))
+                            .color(color),
+                    );
+                }
+            });
+    }
+
     fn draw_results(&mut self, ui: &mut egui::Ui) {
         let brief = match &self.current_brief {
             Some(b) => b.clone(),
@@ -780,6 +993,16 @@ impl FeedbriefApp {
                 ui.add_space(20.0);
                 draw_double_rule(ui);
                 ui.add_space(28.0);
+
+                ui.label(overline("TODAY'S HEADLINE"));
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(&brief.headline)
+                        .font(FontId::new(32.0, FontFamily::Name("serif-bold".into())))
+                        .color(GOLD),
+                );
+
+                ui.add_space(24.0);
 
                 ui.label(overline("EXECUTIVE BRIEFING"));
                 ui.add_space(16.0);
@@ -801,6 +1024,12 @@ impl FeedbriefApp {
                     .font(FontId::new(10.0, FontFamily::Monospace))
                     .color(INK_FAINT),
                 );
+
+                ui.add_space(24.0);
+                draw_rule(ui);
+                ui.add_space(20.0);
+
+                self.draw_publish_bar(ui, &brief);
 
                 ui.add_space(24.0);
                 draw_rule(ui);
@@ -1238,4 +1467,82 @@ fn configure_fonts(ctx: &egui::Context) {
     }
 
     ctx.set_fonts(fonts);
+}
+
+async fn do_publish_http(
+    endpoint: &str,
+    token: &str,
+    payload: &PublishDigestPayload,
+) -> Result<String, String> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(format!("HTTP client error: {}", e)),
+    };
+
+    let mut req = client
+        .post(endpoint)
+        .header("Content-Type", "application/json");
+
+    let trimmed_token = token.trim();
+    if !trimmed_token.is_empty() {
+        let auth_val = if trimmed_token.to_lowercase().starts_with("bearer ") {
+            trimmed_token.to_string()
+        } else {
+            format!("Bearer {}", trimmed_token)
+        };
+        req = req.header("Authorization", auth_val);
+    }
+
+    match req.json(payload).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                Ok(format!("Digest published successfully! (HTTP {})", status))
+            } else {
+                Err(format!("Publish failed with HTTP {}: {}", status, text))
+            }
+        }
+        Err(e) => Err(format!("Network request failed: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_publish_digest_payload_serialization() {
+        let payload = PublishDigestPayload {
+            date: "2026-08-07T10:00:00.000Z".to_string(),
+            headline: "Quantum Computing Milestones & Cloud AI Scaling Standards".to_string(),
+            executive_brief: "Key industry advancements in GPU cluster interconnects and multi-agent governance frameworks.".to_string(),
+            tags: vec!["ai".to_string(), "architecture".to_string(), "infrastructure".to_string()],
+            content: "### Major Breakthroughs\n\nDetailed breakdown of new LLM serving optimisations...".to_string(),
+            sources: vec![
+                PublishSource {
+                    title: "ArXiv AI Infrastructure Paper".to_string(),
+                    url: "https://arxiv.org".to_string(),
+                    description: "Open access research on cluster scaling.".to_string(),
+                }
+            ],
+        };
+
+        let json = serde_json::to_string_pretty(&payload).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val["date"], "2026-08-07T10:00:00.000Z");
+        assert_eq!(
+            val["headline"],
+            "Quantum Computing Milestones & Cloud AI Scaling Standards"
+        );
+        assert_eq!(
+            val["executiveBrief"],
+            "Key industry advancements in GPU cluster interconnects and multi-agent governance frameworks."
+        );
+        assert_eq!(val["tags"][0], "ai");
+        assert_eq!(val["sources"][0]["title"], "ArXiv AI Infrastructure Paper");
+    }
 }

@@ -3,3 +3,4 @@ target/
 .DS_Store
 assets/*.ttf
 target
+unsloth_compiled_cache/
