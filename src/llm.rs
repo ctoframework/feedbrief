@@ -217,6 +217,92 @@ pub fn is_valid_summary(summary: &str) -> bool {
     true
 }
 
+pub fn strip_summary_preamble(summary: &str) -> String {
+    let mut text = summary.trim();
+
+    // Check line by line if the first line is pure preamble
+    if let Some((first_line, rest)) = text.split_once('\n') {
+        let first_trimmed = first_line.trim();
+        let lower = first_trimmed.to_lowercase();
+        if (lower.starts_with("here is")
+            || lower.starts_with("here's")
+            || lower.starts_with("below is")
+            || lower.starts_with("sure,")
+            || lower.starts_with("sure!")
+            || lower.starts_with("summary:")
+            || lower.starts_with("two-sentence summary:")
+            || lower.starts_with("2-sentence summary:")
+            || lower.ends_with(':'))
+            && (lower.contains("summary")
+                || lower.contains("here is")
+                || lower.contains("here's")
+                || lower.ends_with(':'))
+        {
+            text = rest.trim();
+        }
+    }
+
+    let lower = text.to_lowercase();
+    let inline_preamble_prefixes = [
+        "here is a 2-sentence summary of the news item for a chief technology officer:",
+        "here is a 2-sentence summary of the news item:",
+        "here is a 2-sentence summary of the news:",
+        "here is a 2-sentence summary:",
+        "here is a two-sentence summary:",
+        "here is a summary of the article:",
+        "here is a summary of the news:",
+        "here is a summary:",
+        "here is the 2-sentence summary:",
+        "here is the summary:",
+        "here's a 2-sentence summary of the news item:",
+        "here's a 2-sentence summary of the news:",
+        "here's a 2-sentence summary:",
+        "here's a two-sentence summary:",
+        "here's a summary of the news:",
+        "here's a summary:",
+        "here's the summary:",
+        "two-sentence summary:",
+        "2-sentence summary:",
+        "summary:",
+    ];
+
+    for prefix in inline_preamble_prefixes {
+        if lower.starts_with(prefix) {
+            let after = text[prefix.len()..].trim();
+            if !after.is_empty() {
+                text = after;
+                break;
+            }
+        }
+    }
+
+    if let Some(idx) = text.find(':') {
+        let prefix = text[..idx].trim();
+        let prefix_lower = prefix.to_lowercase();
+        if (prefix_lower.starts_with("here is")
+            || prefix_lower.starts_with("here's")
+            || prefix_lower.starts_with("below is")
+            || prefix_lower.starts_with("sure")
+            || prefix_lower == "summary"
+            || prefix_lower == "two-sentence summary"
+            || prefix_lower == "2-sentence summary")
+            && (prefix_lower.contains("summary")
+                || prefix_lower.contains("here is")
+                || prefix_lower.contains("here's"))
+        {
+            let after = text[idx + 1..].trim();
+            if !after.is_empty() {
+                text = after;
+            }
+        }
+    }
+
+    text.trim_start_matches('"')
+        .trim_start_matches('\'')
+        .trim()
+        .to_string()
+}
+
 pub async fn summarize_article(
     client: &reqwest::Client,
     model: &str,
@@ -230,16 +316,17 @@ pub async fn summarize_article(
 
     let prompt = format!(
         r#"Summarize the following news item in EXACTLY 2 sentences for {}. Be concrete: name the actors, the number, the technique, the impact. No fluff, no "in this article", no editorializing.
+Output ONLY the 2-sentence summary itself. Do NOT include any preamble, introductory text, or labels such as "Here is a 2-sentence summary" or "Summary:". Start directly with the summary text.
 
 Title: {}
 Source: {}
 Content: {}
 
-Two-sentence summary:"#,
+Summary:"#,
         persona_name, article.title, article.source, body
     );
     let response = ollama_call(client, model, prompt, false, 200).await?;
-    let summary = response.trim().to_string();
+    let summary = strip_summary_preamble(&response);
 
     if !is_valid_summary(&summary) {
         anyhow::bail!("LLM failed to produce a valid summary: {}", summary);
@@ -444,6 +531,32 @@ mod tests {
                 "Expected refusal to be invalid: {}",
                 refusal
             );
+        }
+    }
+
+    #[test]
+    fn test_strip_summary_preamble() {
+        let cases = [
+            (
+                "Here is a 2-sentence summary of the news item for a Chief Technology Officer:\n\nNvidia launched Blackwell GPUs. They feature 208 billion transistors.",
+                "Nvidia launched Blackwell GPUs. They feature 208 billion transistors.",
+            ),
+            (
+                "Here is a 2-sentence summary of the news: AMD announced MI300X. Memory bandwidth reached 5.3 TB/s.",
+                "AMD announced MI300X. Memory bandwidth reached 5.3 TB/s.",
+            ),
+            (
+                "Summary: Meta released Llama 3. The 70B model was trained on 15T tokens.",
+                "Meta released Llama 3. The 70B model was trained on 15T tokens.",
+            ),
+            (
+                "Direct summary sentence one. Direct summary sentence two.",
+                "Direct summary sentence one. Direct summary sentence two.",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(strip_summary_preamble(input), expected);
         }
     }
 }
