@@ -2,11 +2,11 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::feeds::Persona;
 use crate::fetcher::fetch_all;
-use crate::llm::{daily_brief, ollama_client, score_articles, summarize_article};
+use crate::llm::{LlmConfig, daily_brief, llm_client, score_articles, summarize_article};
 use crate::progress::{BriefStats, ProgressEvent};
 
 pub struct PipelineConfig {
-    pub model: String,
+    pub llm_config: LlmConfig,
     pub hours: i64,
     pub top_n: usize,
     pub persona: Persona,
@@ -40,13 +40,13 @@ pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent
         return;
     }
 
-    let client = ollama_client();
+    let client = llm_client();
     let mut to_score: Vec<_> = articles.into_iter().take(80).collect();
 
     // === SCORE ===
     if let Err(e) = score_articles(
         &client,
-        &cfg.model,
+        &cfg.llm_config,
         &cfg.persona.name,
         &cfg.persona.description,
         &mut to_score,
@@ -55,8 +55,10 @@ pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent
     .await
     {
         let _ = tx.send(ProgressEvent::Error(format!(
-            "LLM scoring failed: {}. Is Ollama running with model '{}'?",
-            e, cfg.model
+            "LLM scoring failed: {}. Provider: {}, Model: '{}'",
+            e,
+            cfg.llm_config.provider,
+            cfg.llm_config.active_model()
         )));
         return;
     }
@@ -79,7 +81,7 @@ pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent
             message: format!("[{}/{}] {}", i + 1, n_candidates, title_short),
             percent: pct,
         });
-        match summarize_article(&client, &cfg.model, &cfg.persona.name, &article).await {
+        match summarize_article(&client, &cfg.llm_config, &cfg.persona.name, &article).await {
             Ok(s) => {
                 article.ai_summary = Some(s);
                 summarized_top.push(article);
@@ -113,7 +115,7 @@ pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent
         message: "Synthesizing headline and executive brief…".into(),
         percent: 94,
     });
-    let brief_output = daily_brief(&client, &cfg.model, &cfg.persona.name, &top)
+    let brief_output = daily_brief(&client, &cfg.llm_config, &cfg.persona.name, &top)
         .await
         .unwrap_or_else(|e| crate::llm::BriefOutput {
             headline: "Daily Intelligence Briefing".to_string(),
@@ -137,3 +139,4 @@ pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent
         },
     });
 }
+

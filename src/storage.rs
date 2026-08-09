@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::feeds::Persona;
 use crate::fetcher::Article;
+use crate::llm::LlmConfig;
 use crate::progress::BriefStats;
 
 const PERSONA_CONFIG_VERSION: u32 = 1;
@@ -125,6 +126,11 @@ impl Storage {
                 created_at   TEXT NOT NULL,
                 PRIMARY KEY (date, persona_id),
                 FOREIGN KEY (persona_id) REFERENCES personas(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );
         "#,
         )?;
@@ -378,4 +384,32 @@ impl Storage {
         ).optional().context("query next_date")?;
         Ok(result)
     }
+
+    pub fn load_llm_config(&self) -> Result<LlmConfig> {
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'llm_config'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if let Some(json) = result {
+            if let Ok(config) = serde_json::from_str::<LlmConfig>(&json) {
+                return Ok(config);
+            }
+        }
+        Ok(LlmConfig::default())
+    }
+
+    pub fn save_llm_config(&self, config: &LlmConfig) -> Result<()> {
+        let json = serde_json::to_string(config)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('llm_config', ?)",
+            params![json],
+        )?;
+        Ok(())
+    }
 }
+

@@ -6,7 +6,66 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::fetcher::Article;
 use crate::progress::ProgressEvent;
 
-const OLLAMA_URL: &str = "http://localhost:11434/api/generate";
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProviderType {
+    Ollama,
+    OpenRouter,
+}
+
+impl std::fmt::Display for ProviderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProviderType::Ollama => write!(f, "Ollama"),
+            ProviderType::OpenRouter => write!(f, "OpenRouter"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LlmConfig {
+    pub provider: ProviderType,
+    pub ollama_url: String,
+    pub ollama_model: String,
+    pub openrouter_api_key: String,
+    pub openrouter_model: String,
+    pub openrouter_url: String,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: ProviderType::Ollama,
+            ollama_url: "http://localhost:11434".to_string(),
+            ollama_model: "llama3.1:8b".to_string(),
+            openrouter_api_key: String::new(),
+            openrouter_model: "openai/gpt-4o-mini".to_string(),
+            openrouter_url: "https://openrouter.ai/api/v1".to_string(),
+        }
+    }
+}
+
+impl LlmConfig {
+    pub fn active_model(&self) -> &str {
+        match self.provider {
+            ProviderType::Ollama => &self.ollama_model,
+            ProviderType::OpenRouter => &self.openrouter_model,
+        }
+    }
+
+    pub fn active_model_display(&self) -> String {
+        match self.provider {
+            ProviderType::Ollama => self.ollama_model.clone(),
+            ProviderType::OpenRouter => format!("openrouter:{}", self.openrouter_model),
+        }
+    }
+
+    pub fn provider_label(&self) -> &'static str {
+        match self.provider {
+            ProviderType::Ollama => "OLLAMA",
+            ProviderType::OpenRouter => "OPENROUTER",
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct OllamaRequest<'a> {
@@ -30,11 +89,13 @@ struct OllamaResponse {
 
 async fn ollama_call(
     client: &reqwest::Client,
+    base_url: &str,
     model: &str,
     prompt: String,
     json_mode: bool,
     max_tokens: i32,
 ) -> Result<String> {
+    let endpoint = format!("{}/api/generate", base_url.trim_end_matches('/'));
     let req = OllamaRequest {
         model,
         prompt,
@@ -46,7 +107,7 @@ async fn ollama_call(
         },
     };
     let resp = client
-        .post(OLLAMA_URL)
+        .post(&endpoint)
         .timeout(Duration::from_secs(240))
         .json(&req)
         .send()
@@ -68,6 +129,202 @@ async fn ollama_call(
     Ok(body.response)
 }
 
+#[derive(Serialize)]
+struct OpenRouterMessage<'a> {
+    role: &'a str,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct OpenRouterResponseFormat<'a> {
+    #[serde(rename = "type")]
+    format_type: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenRouterRequest<'a> {
+    model: &'a str,
+    messages: Vec<OpenRouterMessage<'a>>,
+    temperature: f32,
+    max_tokens: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<OpenRouterResponseFormat<'a>>,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterChoice {
+    message: OpenRouterChatMessage,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterChatMessage {
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterResponse {
+    choices: Option<Vec<OpenRouterChoice>>,
+    error: Option<OpenRouterErrorDetail>,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterErrorDetail {
+    message: Option<String>,
+}
+
+async fn openrouter_call(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    prompt: String,
+    json_mode: bool,
+    max_tokens: i32,
+) -> Result<String> {
+    if api_key.trim().is_empty() {
+        anyhow::bail!("OpenRouter API key is missing. Please configure it in LLM Settings.");
+    }
+
+    let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+
+    let req = OpenRouterRequest {
+        model,
+        messages: vec![OpenRouterMessage {
+            role: "user",
+            content: prompt,
+        }],
+        temperature: 0.2,
+        max_tokens,
+        response_format: if json_mode {
+            Some(OpenRouterResponseFormat {
+                format_type: "json_object",
+            })
+        } else {
+            None
+        },
+    };
+
+    let resp = client
+        .post(&endpoint)
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("HTTP-Referer", "https://ctoframework.com")
+        .header("X-Title", "Feedbrief")
+        .timeout(Duration::from_secs(240))
+        .json(&req)
+        .send()
+        .await
+        .context("Failed to send request to OpenRouter API")?;
+
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .context("Failed to read OpenRouter response body")?;
+
+    if !status.is_success() {
+        if json_mode && status.as_u16() == 400 && text.contains("response_format") {
+            let req_no_format = OpenRouterRequest {
+                model,
+                messages: vec![OpenRouterMessage {
+                    role: "user",
+                    content: req.messages[0].content.clone(),
+                }],
+                temperature: 0.2,
+                max_tokens,
+                response_format: None,
+            };
+            let resp_retry = client
+                .post(&endpoint)
+                .header("Authorization", format!("Bearer {}", api_key.trim()))
+                .header("HTTP-Referer", "https://ctoframework.com")
+                .header("X-Title", "Feedbrief")
+                .timeout(Duration::from_secs(240))
+                .json(&req_no_format)
+                .send()
+                .await
+                .context("Failed to send retry request to OpenRouter API")?;
+
+            let status_retry = resp_retry.status();
+            let text_retry = resp_retry
+                .text()
+                .await
+                .context("Failed to read OpenRouter retry response body")?;
+
+            if !status_retry.is_success() {
+                anyhow::bail!("OpenRouter returned error {}: {}", status_retry, text_retry);
+            }
+            let body: OpenRouterResponse = serde_json::from_str(&text_retry)
+                .with_context(|| format!("Failed to parse OpenRouter JSON: {}", text_retry))?;
+
+            if let Some(err) = body.error {
+                anyhow::bail!("OpenRouter API error: {}", err.message.unwrap_or_default());
+            }
+
+            if let Some(choices) = body.choices {
+                if let Some(first) = choices.into_iter().next() {
+                    if let Some(content) = first.message.content {
+                        return Ok(content);
+                    }
+                }
+            }
+            anyhow::bail!("OpenRouter response contained no choices/content");
+        }
+
+        anyhow::bail!("OpenRouter returned error {}: {}", status, text);
+    }
+
+    let body: OpenRouterResponse = serde_json::from_str(&text)
+        .with_context(|| format!("Failed to parse OpenRouter JSON: {}", text))?;
+
+    if let Some(err) = body.error {
+        anyhow::bail!("OpenRouter API error: {}", err.message.unwrap_or_default());
+    }
+
+    if let Some(choices) = body.choices {
+        if let Some(first) = choices.into_iter().next() {
+            if let Some(content) = first.message.content {
+                return Ok(content);
+            }
+        }
+    }
+
+    anyhow::bail!("OpenRouter response contained no choices/content")
+}
+
+async fn llm_call(
+    client: &reqwest::Client,
+    config: &LlmConfig,
+    prompt: String,
+    json_mode: bool,
+    max_tokens: i32,
+) -> Result<String> {
+    match config.provider {
+        ProviderType::Ollama => {
+            ollama_call(
+                client,
+                &config.ollama_url,
+                &config.ollama_model,
+                prompt,
+                json_mode,
+                max_tokens,
+            )
+            .await
+        }
+        ProviderType::OpenRouter => {
+            openrouter_call(
+                client,
+                &config.openrouter_url,
+                &config.openrouter_api_key,
+                &config.openrouter_model,
+                prompt,
+                json_mode,
+                max_tokens,
+            )
+            .await
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct ScoringResult {
     relevance: f32,
@@ -76,7 +333,7 @@ struct ScoringResult {
 
 pub async fn score_articles(
     client: &reqwest::Client,
-    model: &str,
+    config: &LlmConfig,
     persona_name: &str,
     persona_description: &str,
     articles: &mut [Article],
@@ -126,7 +383,7 @@ The array must have exactly {} entries in the same order as the items above."#,
             chunk.len()
         );
 
-        let response = ollama_call(client, model, prompt, true, 400).await?;
+        let response = llm_call(client, config, prompt, true, 400).await?;
 
         #[derive(Deserialize)]
         struct Wrapper {
@@ -220,7 +477,6 @@ pub fn is_valid_summary(summary: &str) -> bool {
 pub fn strip_summary_preamble(summary: &str) -> String {
     let mut text = summary.trim();
 
-    // Check line by line if the first line is pure preamble
     if let Some((first_line, rest)) = text.split_once('\n') {
         let first_trimmed = first_line.trim();
         let lower = first_trimmed.to_lowercase();
@@ -305,7 +561,7 @@ pub fn strip_summary_preamble(summary: &str) -> String {
 
 pub async fn summarize_article(
     client: &reqwest::Client,
-    model: &str,
+    config: &LlmConfig,
     persona_name: &str,
     article: &Article,
 ) -> Result<String> {
@@ -325,7 +581,7 @@ Content: {}
 Summary:"#,
         persona_name, article.title, article.source, body
     );
-    let response = ollama_call(client, model, prompt, false, 200).await?;
+    let response = llm_call(client, config, prompt, false, 200).await?;
     let summary = strip_summary_preamble(&response);
 
     if !is_valid_summary(&summary) {
@@ -434,7 +690,7 @@ fn fallback_brief_parse(text: &str) -> BriefOutput {
 
 pub async fn daily_brief(
     client: &reqwest::Client,
-    model: &str,
+    config: &LlmConfig,
     persona_name: &str,
     top_articles: &[Article],
 ) -> Result<BriefOutput> {
@@ -460,7 +716,7 @@ Return ONLY a JSON object of this exact format:
         bullets.join("\n")
     );
 
-    let response = ollama_call(client, model, prompt, true, 450).await?;
+    let response = llm_call(client, config, prompt, true, 450).await?;
 
     if let Ok(output) = parse_brief_output(&response) {
         return Ok(output);
@@ -469,37 +725,83 @@ Return ONLY a JSON object of this exact format:
     Ok(fallback_brief_parse(&response))
 }
 
-pub fn ollama_client() -> reqwest::Client {
+pub fn llm_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(240))
         .build()
-        .expect("ollama client")
+        .expect("llm client")
 }
 
-pub async fn check_ollama(model: &str) -> bool {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+#[allow(dead_code)]
+pub fn ollama_client() -> reqwest::Client {
+    llm_client()
+}
+
+pub async fn check_llm_provider(config: &LlmConfig) -> bool {
+    match config.provider {
+        ProviderType::Ollama => check_ollama(&config.ollama_url, &config.ollama_model).await,
+        ProviderType::OpenRouter => check_openrouter(&config.openrouter_url, &config.openrouter_api_key).await,
+    }
+}
+
+pub async fn check_ollama(base_url: &str, model: &str) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
         .build()
-        .unwrap();
-    let resp = match client.get("http://localhost:11434/api/tags").send().await {
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let endpoint = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let resp = match client.get(&endpoint).send().await {
         Ok(r) => r,
         Err(_) => return false,
     };
+    if !resp.status().is_success() {
+        return false;
+    }
     let body: serde_json::Value = match resp.json().await {
         Ok(v) => v,
         Err(_) => return false,
     };
+    if model.is_empty() {
+        return true;
+    }
     body.get("models")
         .and_then(|m| m.as_array())
         .map(|arr| {
             arr.iter().any(|m| {
                 m.get("name")
                     .and_then(|n| n.as_str())
-                    .map(|s| s.starts_with(model))
+                    .map(|s| s.starts_with(model) || model.starts_with(s))
                     .unwrap_or(false)
             })
         })
         .unwrap_or(false)
+}
+
+pub async fn check_openrouter(base_url: &str, api_key: &str) -> bool {
+    if api_key.trim().is_empty() {
+        return false;
+    }
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let endpoint = format!("{}/auth/key", base_url.trim_end_matches('/'));
+    let resp = match client
+        .get(&endpoint)
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    resp.status().is_success()
 }
 
 #[cfg(test)]
@@ -559,4 +861,31 @@ mod tests {
             assert_eq!(strip_summary_preamble(input), expected);
         }
     }
+
+    #[test]
+    fn test_llm_config_defaults() {
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.provider, ProviderType::Ollama);
+        assert_eq!(cfg.active_model(), "llama3.1:8b");
+        assert_eq!(cfg.active_model_display(), "llama3.1:8b");
+        assert_eq!(cfg.provider_label(), "OLLAMA");
+    }
+
+    #[test]
+    fn test_llm_config_openrouter() {
+        let mut cfg = LlmConfig::default();
+        cfg.provider = ProviderType::OpenRouter;
+        cfg.openrouter_model = "openai/gpt-4o-mini".to_string();
+        cfg.openrouter_api_key = "sk-or-v1-testkey".to_string();
+
+        assert_eq!(cfg.active_model(), "openai/gpt-4o-mini");
+        assert_eq!(cfg.active_model_display(), "openrouter:openai/gpt-4o-mini");
+        assert_eq!(cfg.provider_label(), "OPENROUTER");
+
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let deserialized: LlmConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(cfg, deserialized);
+    }
 }
+
+

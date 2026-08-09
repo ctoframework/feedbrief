@@ -6,7 +6,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::feeds::Persona;
 use crate::fetcher::Article;
-use crate::llm::check_ollama;
+use crate::llm::{LlmConfig, ProviderType, check_llm_provider};
 use crate::pipeline::{PipelineConfig, run_pipeline};
 use crate::progress::{BriefStats, ProgressEvent};
 use crate::storage::{Storage, StoredBrief};
@@ -60,7 +60,8 @@ pub struct FeedbriefApp {
     persona_message: String,
     persona_message_is_error: bool,
 
-    model: String,
+    llm_config: LlmConfig,
+    llm_settings_open: bool,
     hours: i64,
     top_n: usize,
 
@@ -73,9 +74,9 @@ pub struct FeedbriefApp {
     current_brief: Option<DisplayedBrief>,
     topic_filter: String,
 
-    ollama_ok: bool,
-    last_ollama_check: std::time::Instant,
-    ollama_check_rx: Option<tokio::sync::oneshot::Receiver<bool>>,
+    llm_ok: bool,
+    last_llm_check: std::time::Instant,
+    llm_check_rx: Option<tokio::sync::oneshot::Receiver<bool>>,
 
     available_dates: Vec<NaiveDate>,
 
@@ -148,6 +149,8 @@ impl FeedbriefApp {
             View::Idle
         };
 
+        let llm_config = storage.load_llm_config().unwrap_or_default();
+
         Self {
             runtime,
             storage,
@@ -159,7 +162,8 @@ impl FeedbriefApp {
             persona_import_path: Storage::personas_config_path().display().to_string(),
             persona_message: String::new(),
             persona_message_is_error: false,
-            model: "llama3.1:8b".to_string(),
+            llm_config,
+            llm_settings_open: false,
             hours: 24,
             top_n: 20,
             progress_rx: None,
@@ -169,9 +173,9 @@ impl FeedbriefApp {
             current_percent: 0,
             current_brief,
             topic_filter: "all".to_string(),
-            ollama_ok: false,
-            last_ollama_check: std::time::Instant::now() - std::time::Duration::from_secs(60),
-            ollama_check_rx: None,
+            llm_ok: false,
+            last_llm_check: std::time::Instant::now() - std::time::Duration::from_secs(60),
+            llm_check_rx: None,
             available_dates,
             publish_endpoint: "http://localhost:3000/api/news-digest".to_string(),
             publish_token: "YOUR_SECRET_KEY".to_string(),
@@ -193,7 +197,7 @@ impl FeedbriefApp {
 
         let persona = self.personas[self.selected_persona_idx].clone();
         let cfg = PipelineConfig {
-            model: self.model.clone(),
+            llm_config: self.llm_config.clone(),
             hours: self.hours,
             top_n: self.top_n,
             persona,
@@ -236,7 +240,7 @@ impl FeedbriefApp {
                             &brief,
                             &articles,
                             &stats,
-                            &self.model,
+                            &self.llm_config.active_model_display(),
                         );
                         self.available_dates =
                             self.storage.all_dates(persona_id).unwrap_or_default();
@@ -246,7 +250,7 @@ impl FeedbriefApp {
                             brief,
                             articles,
                             stats,
-                            model: self.model.clone(),
+                            model: self.llm_config.active_model_display(),
                         });
                         self.topic_filter = "all".to_string();
                         self.view = View::Results;
@@ -268,25 +272,25 @@ impl FeedbriefApp {
         }
     }
 
-    fn poll_ollama(&mut self) {
+    fn poll_llm(&mut self) {
         // Receive previous check result if any
-        if let Some(rx) = self.ollama_check_rx.as_mut() {
+        if let Some(rx) = self.llm_check_rx.as_mut() {
             if let Ok(result) = rx.try_recv() {
-                self.ollama_ok = result;
-                self.ollama_check_rx = None;
+                self.llm_ok = result;
+                self.llm_check_rx = None;
             }
         }
 
         // Kick off a new check periodically
-        if self.ollama_check_rx.is_none()
-            && self.last_ollama_check.elapsed() > std::time::Duration::from_secs(10)
+        if self.llm_check_rx.is_none()
+            && self.last_llm_check.elapsed() > std::time::Duration::from_secs(10)
         {
-            let model = self.model.clone();
+            let config = self.llm_config.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
-            self.ollama_check_rx = Some(rx);
-            self.last_ollama_check = std::time::Instant::now();
+            self.llm_check_rx = Some(rx);
+            self.last_llm_check = std::time::Instant::now();
             self.runtime.spawn(async move {
-                let ok = check_ollama(&model).await;
+                let ok = check_llm_provider(&config).await;
                 let _ = tx.send(ok);
             });
         }
@@ -305,7 +309,7 @@ impl FeedbriefApp {
 impl eframe::App for FeedbriefApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_progress(ctx);
-        self.poll_ollama();
+        self.poll_llm();
         self.poll_publish();
 
         egui::CentralPanel::default()
@@ -327,6 +331,9 @@ impl eframe::App for FeedbriefApp {
 
         if self.persona_manager_open {
             self.draw_persona_manager(ctx);
+        }
+        if self.llm_settings_open {
+            self.draw_llm_settings(ctx);
         }
     }
 }
@@ -500,18 +507,20 @@ impl FeedbriefApp {
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let dot_color = if self.ollama_ok { GREEN } else { ACCENT };
-                        let status_text = if self.ollama_ok {
-                            format!("OLLAMA · {} READY", self.model.to_uppercase())
+                        let dot_color = if self.llm_ok { GREEN } else { ACCENT };
+                        let status_text = if self.llm_ok {
+                            format!("{} · {} READY ⚙", self.llm_config.provider_label(), self.llm_config.active_model().to_uppercase())
                         } else {
-                            "OLLAMA OFFLINE / MODEL MISSING".to_string()
+                            format!("{} OFFLINE / CONFIG ⚙", self.llm_config.provider_label())
                         };
-                        ui.label(
+                        if ui.button(
                             RichText::new(status_text)
                                 .font(FontId::new(10.0, FontFamily::Monospace))
-                                .color(INK_FAINT),
-                        );
-                        ui.add_space(8.0);
+                                .color(if self.llm_ok { INK_DIM } else { ACCENT }),
+                        ).clicked() {
+                            self.llm_settings_open = true;
+                        }
+                        ui.add_space(6.0);
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
                         ui.painter().circle_filled(rect.center(), 4.0, dot_color);
@@ -689,6 +698,240 @@ impl FeedbriefApp {
         self.persona_manager_open = open;
     }
 
+    fn draw_llm_settings(&mut self, ctx: &egui::Context) {
+        let mut open = self.llm_settings_open;
+        let mut config_changed = false;
+        let mut should_close = false;
+        egui::Window::new("LLM & Model Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(540.0)
+            .show(ctx, |ui| {
+                ui.label("Configure local models via Ollama or cloud LLMs via OpenRouter.");
+                ui.add_space(12.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("PROVIDER")
+                            .font(FontId::new(10.0, FontFamily::Monospace))
+                            .color(INK_FAINT),
+                    );
+                    ui.add_space(10.0);
+                    if ui
+                        .selectable_label(
+                            self.llm_config.provider == ProviderType::Ollama,
+                            "Ollama (Local)",
+                        )
+                        .clicked()
+                    {
+                        if self.llm_config.provider != ProviderType::Ollama {
+                            self.llm_config.provider = ProviderType::Ollama;
+                            config_changed = true;
+                        }
+                    }
+                    if ui
+                        .selectable_label(
+                            self.llm_config.provider == ProviderType::OpenRouter,
+                            "OpenRouter (Cloud)",
+                        )
+                        .clicked()
+                    {
+                        if self.llm_config.provider != ProviderType::OpenRouter {
+                            self.llm_config.provider = ProviderType::OpenRouter;
+                            config_changed = true;
+                        }
+                    }
+                });
+
+                ui.add_space(12.0);
+                draw_rule(ui);
+                ui.add_space(12.0);
+
+                match self.llm_config.provider {
+                    ProviderType::Ollama => {
+                        ui.label(
+                            RichText::new("OLLAMA CONFIGURATION")
+                                .font(FontId::new(11.0, FontFamily::Monospace))
+                                .color(GOLD),
+                        );
+                        ui.add_space(8.0);
+
+                        ui.label("Base Endpoint URL:");
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.llm_config.ollama_url)
+                                    .hint_text("http://localhost:11434"),
+                            )
+                            .changed()
+                        {
+                            config_changed = true;
+                        }
+
+                        ui.add_space(8.0);
+                        ui.label("Model Preset:");
+                        let presets = [
+                            "llama3.1:8b",
+                            "qwen2.5:7b",
+                            "qwen2.5:14b",
+                            "mistral:7b",
+                            "gemma2:9b",
+                            "deepseek-r1:8b",
+                            "phi4:14b",
+                        ];
+                        egui::ComboBox::from_id_salt("ollama_model_preset")
+                            .selected_text(&self.llm_config.ollama_model)
+                            .show_ui(ui, |ui| {
+                                for p in presets {
+                                    if ui
+                                        .selectable_label(self.llm_config.ollama_model == p, p)
+                                        .clicked()
+                                    {
+                                        self.llm_config.ollama_model = p.to_string();
+                                        config_changed = true;
+                                    }
+                                }
+                            });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Custom Model:")
+                                    .font(FontId::new(11.0, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                            if ui
+                                .add(egui::TextEdit::singleline(
+                                    &mut self.llm_config.ollama_model,
+                                ))
+                                .changed()
+                            {
+                                config_changed = true;
+                            }
+                        });
+
+                        ui.add_space(12.0);
+                        let status_str = if self.llm_ok {
+                            format!(
+                                "✔ Connected to Ollama — model '{}' ready",
+                                self.llm_config.ollama_model
+                            )
+                        } else {
+                            "✖ Cannot connect to Ollama server or model not found. Ensure `ollama serve` is running"
+                                .to_string()
+                        };
+                        let color = if self.llm_ok { GREEN } else { ACCENT };
+                        ui.label(RichText::new(status_str).color(color));
+                    }
+                    ProviderType::OpenRouter => {
+                        ui.label(
+                            RichText::new("OPENROUTER CONFIGURATION")
+                                .font(FontId::new(11.0, FontFamily::Monospace))
+                                .color(GOLD),
+                        );
+                        ui.add_space(8.0);
+
+                        ui.label("API Key:");
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(
+                                    &mut self.llm_config.openrouter_api_key,
+                                )
+                                .password(true)
+                                .hint_text("sk-or-v1-..."),
+                            )
+                            .changed()
+                        {
+                            config_changed = true;
+                        }
+
+                        ui.add_space(8.0);
+                        ui.label("Model Preset:");
+                        let presets = [
+                            "openai/gpt-4o-mini",
+                            "anthropic/claude-3.5-sonnet",
+                            "meta-llama/llama-3.1-8b-instruct",
+                            "meta-llama/llama-3.3-70b-instruct",
+                            "google/gemini-2.0-flash-001",
+                            "deepseek/deepseek-r1",
+                            "qwen/qwen-2.5-72b-instruct",
+                            "mistralai/mistral-large",
+                        ];
+                        egui::ComboBox::from_id_salt("openrouter_model_preset")
+                            .selected_text(&self.llm_config.openrouter_model)
+                            .show_ui(ui, |ui| {
+                                for p in presets {
+                                    if ui
+                                        .selectable_label(self.llm_config.openrouter_model == p, p)
+                                        .clicked()
+                                    {
+                                        self.llm_config.openrouter_model = p.to_string();
+                                        config_changed = true;
+                                    }
+                                }
+                            });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Custom Model:")
+                                    .font(FontId::new(11.0, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                            if ui
+                                .add(egui::TextEdit::singleline(
+                                    &mut self.llm_config.openrouter_model,
+                                ))
+                                .changed()
+                            {
+                                config_changed = true;
+                            }
+                        });
+
+                        ui.add_space(8.0);
+                        ui.label("API Base URL:");
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.llm_config.openrouter_url)
+                                    .hint_text("https://openrouter.ai/api/v1"),
+                            )
+                            .changed()
+                        {
+                            config_changed = true;
+                        }
+
+                        ui.add_space(12.0);
+                        let status_str = if self.llm_ok {
+                            format!(
+                                "✔ Connected to OpenRouter — Key verified & model '{}' set",
+                                self.llm_config.openrouter_model
+                            )
+                        } else {
+                            "✖ API Key missing or unverified".to_string()
+                        };
+                        let color = if self.llm_ok { GREEN } else { ACCENT };
+                        ui.label(RichText::new(status_str).color(color));
+                    }
+                }
+
+                ui.add_space(16.0);
+                draw_rule(ui);
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Close").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+
+        if should_close {
+            open = false;
+        }
+        self.llm_settings_open = open;
+        if config_changed {
+            let _ = self.storage.save_llm_config(&self.llm_config);
+            self.last_llm_check = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        }
+    }
+
     fn draw_idle(&mut self, ui: &mut egui::Ui) {
         ui.add_space(60.0);
         ui.vertical_centered(|ui| {
@@ -703,7 +946,7 @@ impl FeedbriefApp {
                     .font(FontId::new(72.0, FontFamily::Name("serif-italic".into())))
                     .color(GOLD));
                 ui.add_space(20.0);
-                ui.label(RichText::new("A synthesis of AI, research, startups, hardware, security and emerging tech — distilled by a local model that never leaves your machine.")
+                ui.label(RichText::new("A synthesis of AI, research, startups, hardware, security and emerging tech — distilled by configurable intelligence.")
                     .font(FontId::new(17.0, FontFamily::Name("serif".into())))
                     .color(INK_DIM));
 
@@ -712,14 +955,92 @@ impl FeedbriefApp {
                 ui.add_space(14.0);
 
                 ui.horizontal(|ui| {
-                    control_select(ui, "MODEL", &mut self.model,
-                        &["llama3.1:8b", "qwen2.5:7b", "qwen2.5:14b", "mistral:7b", "gemma2:9b"]);
-                    ui.add_space(28.0);
+                    // PROVIDER
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("PROVIDER")
+                                .font(FontId::new(9.5, FontFamily::Monospace))
+                                .color(INK_FAINT),
+                        );
+                        let prev_provider = self.llm_config.provider.clone();
+                        egui::ComboBox::from_id_salt("idle_provider_select")
+                            .selected_text(
+                                RichText::new(self.llm_config.provider.to_string())
+                                    .font(FontId::new(15.0, FontFamily::Name("serif-italic".into())))
+                                    .color(GOLD),
+                            )
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(self.llm_config.provider == ProviderType::Ollama, "Ollama").clicked() {
+                                    self.llm_config.provider = ProviderType::Ollama;
+                                }
+                                if ui.selectable_label(self.llm_config.provider == ProviderType::OpenRouter, "OpenRouter").clicked() {
+                                    self.llm_config.provider = ProviderType::OpenRouter;
+                                }
+                            });
+                        if self.llm_config.provider != prev_provider {
+                            let _ = self.storage.save_llm_config(&self.llm_config);
+                            self.last_llm_check = std::time::Instant::now() - std::time::Duration::from_secs(60);
+                        }
+                    });
+                    ui.add_space(20.0);
+
+                    // MODEL
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("MODEL")
+                                .font(FontId::new(9.5, FontFamily::Monospace))
+                                .color(INK_FAINT),
+                        );
+                        let active_model = self.llm_config.active_model().to_string();
+                        let mut selected_model = active_model.clone();
+                        let options: Vec<&str> = match self.llm_config.provider {
+                            ProviderType::Ollama => vec!["llama3.1:8b", "qwen2.5:7b", "qwen2.5:14b", "mistral:7b", "gemma2:9b", "deepseek-r1:8b"],
+                            ProviderType::OpenRouter => vec![
+                                "openai/gpt-4o-mini",
+                                "anthropic/claude-3.5-sonnet",
+                                "meta-llama/llama-3.1-8b-instruct",
+                                "meta-llama/llama-3.3-70b-instruct",
+                                "google/gemini-2.0-flash-001",
+                                "deepseek/deepseek-r1",
+                            ],
+                        };
+                        egui::ComboBox::from_id_salt("idle_model_select")
+                            .selected_text(
+                                RichText::new(&active_model)
+                                    .font(FontId::new(15.0, FontFamily::Name("serif-italic".into())))
+                                    .color(GOLD),
+                            )
+                            .show_ui(ui, |ui| {
+                                for opt in options {
+                                    if ui.selectable_label(selected_model == opt, opt).clicked() {
+                                        selected_model = opt.to_string();
+                                    }
+                                }
+                            });
+                        if selected_model != active_model {
+                            match self.llm_config.provider {
+                                ProviderType::Ollama => self.llm_config.ollama_model = selected_model,
+                                ProviderType::OpenRouter => self.llm_config.openrouter_model = selected_model,
+                            }
+                            let _ = self.storage.save_llm_config(&self.llm_config);
+                            self.last_llm_check = std::time::Instant::now() - std::time::Duration::from_secs(60);
+                        }
+                    });
+                    ui.add_space(10.0);
+
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(" ").font(FontId::new(9.5, FontFamily::Monospace)));
+                        if ui.button("⚙ Config").clicked() {
+                            self.llm_settings_open = true;
+                        }
+                    });
+
+                    ui.add_space(24.0);
 
                     let mut hours_str = self.hours.to_string();
                     control_select(ui, "WINDOW (HRS)", &mut hours_str, &["12", "24", "48", "72"]);
                     self.hours = hours_str.parse().unwrap_or(24);
-                    ui.add_space(28.0);
+                    ui.add_space(24.0);
 
                     let mut top_str = self.top_n.to_string();
                     control_select(ui, "DEPTH (TOP N)", &mut top_str, &["10", "15", "20", "30"]);
@@ -734,7 +1055,11 @@ impl FeedbriefApp {
                     self.start_fetch();
                 }
                 ui.add_space(16.0);
-                ui.label(RichText::new("⌘ Make sure Ollama is running locally with the chosen model pulled.")
+                let helper_text = match self.llm_config.provider {
+                    ProviderType::Ollama => "⌘ Make sure Ollama is running locally with the chosen model pulled.",
+                    ProviderType::OpenRouter => "⌘ OpenRouter cloud LLM enabled. Configure API key via ⚙ Config if needed.",
+                };
+                ui.label(RichText::new(helper_text)
                     .font(FontId::new(11.0, FontFamily::Monospace)).color(INK_FAINT));
 
                 if !self.available_dates.is_empty() {
