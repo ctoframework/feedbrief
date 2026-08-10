@@ -104,13 +104,42 @@ impl Storage {
             )?;
         }
 
+        let has_publish_endpoint: bool = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('personas') WHERE name='publish_endpoint'",
+                [],
+                |r| Ok(r.get::<_, i64>(0)? > 0),
+            )
+            .unwrap_or(false);
+
+        let personas_table_exists: bool = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='personas'",
+                [],
+                |r| Ok(r.get::<_, i64>(0)? > 0),
+            )
+            .unwrap_or(false);
+
+        if personas_table_exists && !has_publish_endpoint {
+            let _ = conn.execute(
+                "ALTER TABLE personas ADD COLUMN publish_endpoint TEXT NOT NULL DEFAULT 'http://localhost:3000/api/news-digest'",
+                [],
+            );
+            let _ = conn.execute(
+                "ALTER TABLE personas ADD COLUMN publish_token TEXT NOT NULL DEFAULT 'YOUR_SECRET_KEY'",
+                [],
+            );
+        }
+
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS personas (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                name        TEXT NOT NULL UNIQUE,
-                description TEXT NOT NULL,
-                feeds_json  TEXT NOT NULL
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                name             TEXT NOT NULL UNIQUE,
+                description      TEXT NOT NULL,
+                feeds_json       TEXT NOT NULL,
+                publish_endpoint TEXT NOT NULL DEFAULT 'http://localhost:3000/api/news-digest',
+                publish_token    TEXT NOT NULL DEFAULT 'YOUR_SECRET_KEY'
             );
 
             CREATE TABLE IF NOT EXISTS briefs (
@@ -141,12 +170,14 @@ impl Storage {
             let default_persona = Persona::default();
             let feeds_json = serde_json::to_string(&default_persona.feeds)?;
             conn.execute(
-                "INSERT INTO personas (id, name, description, feeds_json) VALUES (?, ?, ?, ?)",
+                "INSERT INTO personas (id, name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?)",
                 params![
                     1,
                     default_persona.name,
                     default_persona.description,
-                    feeds_json
+                    feeds_json,
+                    default_persona.publish_endpoint,
+                    default_persona.publish_token,
                 ],
             )?;
         }
@@ -157,15 +188,19 @@ impl Storage {
     pub fn list_personas(&self) -> Result<Vec<Persona>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, description, feeds_json FROM personas ORDER BY id ASC")?;
+            .prepare("SELECT id, name, description, feeds_json, publish_endpoint, publish_token FROM personas ORDER BY id ASC")?;
         let personas = stmt
             .query_map([], |row| {
                 let feeds_json: String = row.get(3)?;
+                let publish_endpoint: String = row.get(4).unwrap_or_else(|_| "http://localhost:3000/api/news-digest".to_string());
+                let publish_token: String = row.get(5).unwrap_or_else(|_| "YOUR_SECRET_KEY".to_string());
                 Ok(Persona {
                     id: Some(row.get(0)?),
                     name: row.get(1)?,
                     description: row.get(2)?,
                     feeds: serde_json::from_str(&feeds_json).unwrap_or_default(),
+                    publish_endpoint,
+                    publish_token,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -229,13 +264,26 @@ impl Storage {
             let feeds_json = serde_json::to_string(&persona.feeds)?;
             if let Some(id) = persona.id {
                 tx.execute(
-                    "INSERT INTO personas (id, name, description, feeds_json) VALUES (?, ?, ?, ?)",
-                    params![id, persona.name, persona.description, feeds_json],
+                    "INSERT INTO personas (id, name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?)",
+                    params![
+                        id,
+                        persona.name,
+                        persona.description,
+                        feeds_json,
+                        persona.publish_endpoint,
+                        persona.publish_token,
+                    ],
                 )?;
             } else {
                 tx.execute(
-                    "INSERT INTO personas (name, description, feeds_json) VALUES (?, ?, ?)",
-                    params![persona.name, persona.description, feeds_json],
+                    "INSERT INTO personas (name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?)",
+                    params![
+                        persona.name,
+                        persona.description,
+                        feeds_json,
+                        persona.publish_endpoint,
+                        persona.publish_token,
+                    ],
                 )?;
             }
         }
@@ -253,14 +301,27 @@ impl Storage {
         let feeds_json = serde_json::to_string(&persona.feeds)?;
         if let Some(id) = persona.id {
             self.conn.execute(
-                "UPDATE personas SET name = ?, description = ?, feeds_json = ? WHERE id = ?",
-                params![persona.name, persona.description, feeds_json, id],
+                "UPDATE personas SET name = ?, description = ?, feeds_json = ?, publish_endpoint = ?, publish_token = ? WHERE id = ?",
+                params![
+                    persona.name,
+                    persona.description,
+                    feeds_json,
+                    persona.publish_endpoint,
+                    persona.publish_token,
+                    id
+                ],
             )?;
             Ok(id)
         } else {
             self.conn.execute(
-                "INSERT INTO personas (name, description, feeds_json) VALUES (?, ?, ?)",
-                params![persona.name, persona.description, feeds_json],
+                "INSERT INTO personas (name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?)",
+                params![
+                    persona.name,
+                    persona.description,
+                    feeds_json,
+                    persona.publish_endpoint,
+                    persona.publish_token
+                ],
             )?;
             Ok(self.conn.last_insert_rowid())
         }
@@ -410,6 +471,108 @@ impl Storage {
             params![json],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn in_memory_storage() -> Storage {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE personas (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                name             TEXT NOT NULL UNIQUE,
+                description      TEXT NOT NULL,
+                feeds_json       TEXT NOT NULL,
+                publish_endpoint TEXT NOT NULL DEFAULT 'http://localhost:3000/api/news-digest',
+                publish_token    TEXT NOT NULL DEFAULT 'YOUR_SECRET_KEY'
+            );
+            "#,
+        ).unwrap();
+        let default_persona = Persona::default();
+        let feeds_json = serde_json::to_string(&default_persona.feeds).unwrap();
+        conn.execute(
+            "INSERT INTO personas (id, name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                1,
+                default_persona.name,
+                default_persona.description,
+                feeds_json,
+                default_persona.publish_endpoint,
+                default_persona.publish_token,
+            ],
+        ).unwrap();
+        Storage { conn }
+    }
+
+    #[test]
+    fn test_per_persona_publish_configs_save_and_list() {
+        let storage = in_memory_storage();
+
+        let mut sec_persona = Persona {
+            id: None,
+            name: "Security Researcher".to_string(),
+            description: "Cybersecurity vulnerabilities and exploits".to_string(),
+            feeds: vec![],
+            publish_endpoint: "https://security-site.org/api/publish".to_string(),
+            publish_token: "sec_secret_token_123".to_string(),
+        };
+
+        let sec_id = storage.save_persona(&sec_persona).unwrap();
+        sec_persona.id = Some(sec_id);
+
+        let mut cto_persona = Persona {
+            id: None,
+            name: "CTO Persona".to_string(),
+            description: "Executive tech strategy and architecture".to_string(),
+            feeds: vec![],
+            publish_endpoint: "https://cto-brief.com/v1/digest".to_string(),
+            publish_token: "cto_bearer_987".to_string(),
+        };
+
+        let cto_id = storage.save_persona(&cto_persona).unwrap();
+        cto_persona.id = Some(cto_id);
+
+        let personas = storage.list_personas().unwrap();
+        assert_eq!(personas.len(), 3);
+
+        let found_sec = personas.iter().find(|p| p.name == "Security Researcher").unwrap();
+        assert_eq!(found_sec.publish_endpoint, "https://security-site.org/api/publish");
+        assert_eq!(found_sec.publish_token, "sec_secret_token_123");
+
+        let found_cto = personas.iter().find(|p| p.name == "CTO Persona").unwrap();
+        assert_eq!(found_cto.publish_endpoint, "https://cto-brief.com/v1/digest");
+        assert_eq!(found_cto.publish_token, "cto_bearer_987");
+    }
+
+    #[test]
+    fn test_persona_export_import_publish_configs() {
+        let mut storage = in_memory_storage();
+
+        let sec_persona = Persona {
+            id: None,
+            name: "Security Researcher".to_string(),
+            description: "Vulnerabilities and malware analysis".to_string(),
+            feeds: vec![],
+            publish_endpoint: "https://sec.example.com/hooks/publish".to_string(),
+            publish_token: "tok_sec_key".to_string(),
+        };
+        storage.save_persona(&sec_persona).unwrap();
+
+        let json = storage.export_personas_json().unwrap();
+        assert!(json.contains("https://sec.example.com/hooks/publish"));
+        assert!(json.contains("tok_sec_key"));
+
+        let imported_count = storage.import_personas_json(&json).unwrap();
+        assert_eq!(imported_count, 2);
+
+        let personas = storage.list_personas().unwrap();
+        let sec_imported = personas.iter().find(|p| p.name == "Security Researcher").unwrap();
+        assert_eq!(sec_imported.publish_endpoint, "https://sec.example.com/hooks/publish");
+        assert_eq!(sec_imported.publish_token, "tok_sec_key");
     }
 }
 

@@ -7,12 +7,24 @@ pub struct FeedSource {
     pub category: String,
 }
 
+fn default_publish_endpoint() -> String {
+    "http://localhost:3000/api/news-digest".to_string()
+}
+
+fn default_publish_token() -> String {
+    "YOUR_SECRET_KEY".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Persona {
     pub id: Option<i64>,
     pub name: String,
     pub description: String,
     pub feeds: Vec<FeedSource>,
+    #[serde(default = "default_publish_endpoint")]
+    pub publish_endpoint: String,
+    #[serde(default = "default_publish_token")]
+    pub publish_token: String,
 }
 
 impl Default for Persona {
@@ -22,6 +34,8 @@ impl Default for Persona {
             name: "Default".to_string(),
             description: "AI/ML breakthroughs, startups & funding, computer-science research, hardware/chips, robotics, cybersecurity, and emerging tech themes.".to_string(),
             feeds: default_feeds(),
+            publish_endpoint: default_publish_endpoint(),
+            publish_token: default_publish_token(),
         }
     }
 }

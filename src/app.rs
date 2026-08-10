@@ -133,6 +133,8 @@ impl FeedbriefApp {
             .unwrap_or_else(|_| vec![Persona::default()]);
         let selected_persona_idx = 0;
         let selected_persona = &personas[selected_persona_idx];
+        let publish_endpoint = selected_persona.publish_endpoint.clone();
+        let publish_token = selected_persona.publish_token.clone();
 
         let available_dates = storage
             .all_dates(selected_persona.id.unwrap_or(1))
@@ -177,8 +179,8 @@ impl FeedbriefApp {
             last_llm_check: std::time::Instant::now() - std::time::Duration::from_secs(60),
             llm_check_rx: None,
             available_dates,
-            publish_endpoint: "http://localhost:3000/api/news-digest".to_string(),
-            publish_token: "YOUR_SECRET_KEY".to_string(),
+            publish_endpoint,
+            publish_token,
             publish_settings_open: false,
             publish_in_progress: false,
             publish_result_msg: None,
@@ -351,6 +353,10 @@ impl FeedbriefApp {
             self.personas = vec![Persona::default()];
         }
         self.selected_persona_idx = idx.min(self.personas.len() - 1);
+        if let Some(persona) = self.personas.get(self.selected_persona_idx) {
+            self.publish_endpoint = persona.publish_endpoint.clone();
+            self.publish_token = persona.publish_token.clone();
+        }
         let persona_id = self.selected_persona_id();
         self.available_dates = self.storage.all_dates(persona_id).unwrap_or_default();
         let today = Local::now().date_naive();
@@ -659,6 +665,28 @@ impl FeedbriefApp {
                                     .collect();
                             }
 
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new("PUBLISH ENDPOINT")
+                                            .font(FontId::new(9.0, FontFamily::Monospace))
+                                            .color(INK_FAINT),
+                                    );
+                                    ui.text_edit_singleline(&mut persona.publish_endpoint);
+                                });
+                                ui.add_space(16.0);
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new("PUBLISH TOKEN")
+                                            .font(FontId::new(9.0, FontFamily::Monospace))
+                                            .color(INK_FAINT),
+                                    );
+                                    ui.text_edit_singleline(&mut persona.publish_token);
+                                });
+                            });
+                            ui.add_space(6.0);
+
                             if ui.button("Save Changes").clicked() {
                                 to_save = Some(i);
                             }
@@ -683,6 +711,10 @@ impl FeedbriefApp {
 
                 if let Some(idx) = to_save {
                     let _ = self.storage.save_persona(&self.personas[idx]);
+                    if idx == self.selected_persona_idx {
+                        self.publish_endpoint = self.personas[idx].publish_endpoint.clone();
+                        self.publish_token = self.personas[idx].publish_token.clone();
+                    }
                 }
 
                 ui.separator();
@@ -692,6 +724,8 @@ impl FeedbriefApp {
                         name: "New Persona".into(),
                         description: "What are you looking for?".into(),
                         feeds: vec![],
+                        publish_endpoint: "http://localhost:3000/api/news-digest".to_string(),
+                        publish_token: "YOUR_SECRET_KEY".to_string(),
                     });
                 }
             });
@@ -1235,6 +1269,7 @@ impl FeedbriefApp {
 
                 if self.publish_settings_open {
                     ui.add_space(8.0);
+                    let mut config_changed = false;
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label(
@@ -1242,7 +1277,9 @@ impl FeedbriefApp {
                                     .font(FontId::new(9.0, FontFamily::Monospace))
                                     .color(INK_FAINT),
                             );
-                            ui.text_edit_singleline(&mut self.publish_endpoint);
+                            if ui.text_edit_singleline(&mut self.publish_endpoint).changed() {
+                                config_changed = true;
+                            }
                         });
                         ui.add_space(16.0);
                         ui.vertical(|ui| {
@@ -1251,9 +1288,18 @@ impl FeedbriefApp {
                                     .font(FontId::new(9.0, FontFamily::Monospace))
                                     .color(INK_FAINT),
                             );
-                            ui.text_edit_singleline(&mut self.publish_token);
+                            if ui.text_edit_singleline(&mut self.publish_token).changed() {
+                                config_changed = true;
+                            }
                         });
                     });
+                    if config_changed {
+                        if let Some(persona) = self.personas.get_mut(self.selected_persona_idx) {
+                            persona.publish_endpoint = self.publish_endpoint.clone();
+                            persona.publish_token = self.publish_token.clone();
+                            let _ = self.storage.save_persona(persona);
+                        }
+                    }
                     ui.add_space(6.0);
                 }
 
