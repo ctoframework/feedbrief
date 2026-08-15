@@ -34,6 +34,16 @@ pub struct StoredBrief {
     pub persona_id: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct BriefSummary {
+    pub date: NaiveDate,
+    pub headline: String,
+    pub model: String,
+    pub articles_kept: usize,
+    pub created_at: String,
+}
+
+
 pub fn data_dir() -> PathBuf {
     directories::ProjectDirs::from("com", "feedbrief", "Feedbrief")
         .map(|p| p.data_dir().to_path_buf())
@@ -477,6 +487,47 @@ impl Storage {
         Ok(dates)
     }
 
+    /// List summary information for all saved briefs of a persona, sorted descending by date.
+    pub fn list_brief_summaries(&self, persona_id: i64) -> Result<Vec<BriefSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT date, headline, model, articles_kept, created_at FROM briefs WHERE persona_id = ? ORDER BY date DESC",
+        )?;
+        let summaries: Vec<BriefSummary> = stmt
+            .query_map(params![persona_id], |row| {
+                let date_str: String = row.get(0)?;
+                let headline: String = row.get(1)?;
+                let model: String = row.get(2)?;
+                let articles_kept: usize = row.get::<_, i64>(3)? as usize;
+                let created_at: String = row.get(4)?;
+                let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+                    .unwrap_or_else(|_| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap());
+                Ok(BriefSummary {
+                    date,
+                    headline: if headline.trim().is_empty() {
+                        "Daily Intelligence Briefing".to_string()
+                    } else {
+                        headline
+                    },
+                    model,
+                    articles_kept,
+                    created_at,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(summaries)
+    }
+
+    /// Delete a stored brief for a given date and persona_id.
+    pub fn delete_brief(&self, date: NaiveDate, persona_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM briefs WHERE date = ? AND persona_id = ?",
+            params![date.format("%Y-%m-%d").to_string(), persona_id],
+        )?;
+        Ok(())
+    }
+
+
     pub fn previous_date(&self, current: NaiveDate, persona_id: i64) -> Result<Option<NaiveDate>> {
         let result = self.conn.query_row(
             "SELECT date FROM briefs WHERE date < ? AND persona_id = ? ORDER BY date DESC LIMIT 1",
@@ -629,5 +680,53 @@ mod tests {
         assert_eq!(sec_imported.publish_endpoint, "https://sec.example.com/hooks/publish");
         assert_eq!(sec_imported.publish_token, "tok_sec_key");
     }
+
+    #[test]
+    fn test_brief_summaries_and_delete() {
+        let storage = in_memory_storage();
+
+        // Save table definition for briefs
+        storage.conn.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS briefs (
+                date         TEXT NOT NULL,
+                persona_id   INTEGER NOT NULL DEFAULT 1,
+                headline     TEXT NOT NULL DEFAULT '',
+                brief_text   TEXT NOT NULL,
+                articles_json TEXT NOT NULL,
+                feeds_fetched INTEGER NOT NULL,
+                total_articles INTEGER NOT NULL,
+                articles_kept INTEGER NOT NULL,
+                model        TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                PRIMARY KEY (date, persona_id),
+                FOREIGN KEY (persona_id) REFERENCES personas(id)
+            );
+        "#).unwrap();
+
+        let d1 = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+
+        let stats = BriefStats {
+            feeds_fetched: 5,
+            total_articles: 50,
+            articles_kept: 10,
+        };
+
+        storage.save(d1, 1, "Aug 14 Headline", "Brief text 1", &[], &stats, "ollama:llama3").unwrap();
+        storage.save(d2, 1, "Aug 15 Headline", "Brief text 2", &[], &stats, "ollama:llama3").unwrap();
+
+        let summaries = storage.list_brief_summaries(1).unwrap();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].date, d2);
+        assert_eq!(summaries[0].headline, "Aug 15 Headline");
+        assert_eq!(summaries[1].date, d1);
+        assert_eq!(summaries[1].headline, "Aug 14 Headline");
+
+        storage.delete_brief(d2, 1).unwrap();
+        let summaries_after = storage.list_brief_summaries(1).unwrap();
+        assert_eq!(summaries_after.len(), 1);
+        assert_eq!(summaries_after[0].date, d1);
+    }
 }
+
 

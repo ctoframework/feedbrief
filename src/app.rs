@@ -35,6 +35,7 @@ enum View {
     Loading,
     Results,
     PersonasConfig(PersonasSubView),
+    History,
 }
 
 // Published structs imported from publish module
@@ -50,7 +51,9 @@ pub struct FeedbriefApp {
     editing_persona_idx: Option<usize>,
     editing_feeds_text: String,
     delete_confirm_target: Option<usize>,
+    delete_brief_confirm_target: Option<NaiveDate>,
     persona_export_path: String,
+
     persona_import_path: String,
     persona_message: String,
     persona_message_is_error: bool,
@@ -158,6 +161,7 @@ impl FeedbriefApp {
             editing_persona_idx: None,
             editing_feeds_text: String::new(),
             delete_confirm_target: None,
+            delete_brief_confirm_target: None,
             persona_export_path: Storage::personas_config_path().display().to_string(),
             persona_import_path: Storage::personas_config_path().display().to_string(),
             persona_message: String::new(),
@@ -327,11 +331,15 @@ impl eframe::App for FeedbriefApp {
                         View::Loading => self.draw_loading(ui),
                         View::Results => self.draw_results(ui),
                         View::PersonasConfig(sub) => self.draw_personas_config(ui, &sub),
+                        View::History => self.draw_history(ui),
                     });
             });
 
         if self.delete_confirm_target.is_some() {
             self.draw_delete_confirm_modal(ctx);
+        }
+        if self.delete_brief_confirm_target.is_some() {
+            self.draw_delete_brief_confirm_modal(ctx);
         }
         if self.llm_settings_open {
             self.draw_llm_settings(ctx);
@@ -526,13 +534,15 @@ impl FeedbriefApp {
                                 .color(INK_FAINT),
                         );
                         ui.horizontal(|ui| {
+                            let is_history = self.view == View::History;
                             let is_personas = matches!(self.view, View::PersonasConfig(_));
+                            let is_brief = !is_history && !is_personas;
                             if ui
                                 .selectable_label(
-                                    !is_personas,
+                                    is_brief,
                                     RichText::new("📰 Brief")
                                         .font(FontId::new(13.0, FontFamily::Monospace))
-                                        .color(if !is_personas { GOLD } else { INK_DIM }),
+                                        .color(if is_brief { GOLD } else { INK_DIM }),
                                 )
                                 .clicked()
                             {
@@ -541,6 +551,17 @@ impl FeedbriefApp {
                                 } else {
                                     View::Idle
                                 };
+                            }
+                            if ui
+                                .selectable_label(
+                                    is_history,
+                                    RichText::new("📜 History")
+                                        .font(FontId::new(13.0, FontFamily::Monospace))
+                                        .color(if is_history { GOLD } else { INK_DIM }),
+                                )
+                                .clicked()
+                            {
+                                self.view = View::History;
                             }
                             if ui
                                 .selectable_label(
@@ -1700,21 +1721,334 @@ impl FeedbriefApp {
 
                 if !self.available_dates.is_empty() {
                     ui.add_space(40.0);
-                    ui.label(overline("HISTORY"));
-                    ui.add_space(8.0);
-                    ui.horizontal_wrapped(|ui| {
-                        let dates = self.available_dates.clone();
-                        for date in dates.iter().rev().take(14) {
-                            let label = date.format("%b %d").to_string();
-                            if history_pill(ui, &label).clicked() {
-                                self.navigate(*date);
+                    ui.horizontal(|ui| {
+                        ui.label(overline("HISTORY"));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button(
+                                    RichText::new("View Full History →")
+                                        .font(FontId::new(11.0, FontFamily::Monospace))
+                                        .color(GOLD),
+                                )
+                                .clicked()
+                            {
+                                self.view = View::History;
                             }
-                        }
+                        });
                     });
+                    ui.add_space(10.0);
+                    self.draw_history_grid(ui);
                 }
             });
         });
         ui.add_space(60.0);
+    }
+
+    fn draw_history_grid(&mut self, ui: &mut egui::Ui) {
+        let persona_id = self.selected_persona_id();
+        let summaries = self.storage.list_brief_summaries(persona_id).unwrap_or_default();
+
+        if summaries.is_empty() {
+            egui::Frame::none()
+                .fill(BG_RAISED)
+                .stroke(Stroke::new(1.0, RULE))
+                .inner_margin(egui::Margin::same(24.0))
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("No archived briefings for this persona.")
+                                .font(FontId::new(14.0, FontFamily::Name("serif-italic".into())))
+                                .color(INK_FAINT),
+                        );
+                    });
+                });
+            return;
+        }
+
+        egui::Frame::none()
+            .fill(BG_RAISED)
+            .stroke(Stroke::new(1.0, RULE))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                // Header Bar
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(110.0, 20.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.label(overline("DATE"));
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        Vec2::new((ui.available_width() - 280.0).max(120.0), 20.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.label(overline("HEADLINE"));
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(110.0, 20.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.label(overline("ARTICLES"));
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(overline("ACTIONS"));
+                    });
+                });
+
+                ui.add_space(6.0);
+                draw_rule(ui);
+                ui.add_space(8.0);
+
+                let mut navigate_target = None;
+                let mut delete_target = None;
+
+                for (idx, item) in summaries.iter().enumerate() {
+                    if idx > 0 {
+                        ui.add_space(6.0);
+                    }
+                    let date_str = item.date.format("%b %d, %Y").to_string();
+
+                    egui::Frame::none()
+                        .fill(BG_PAPER)
+                        .stroke(Stroke::new(1.0, RULE))
+                        .inner_margin(egui::Margin {
+                            left: 12.0,
+                            right: 12.0,
+                            top: 10.0,
+                            bottom: 10.0,
+                        })
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                // Date Column (~110px)
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(110.0, 24.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(&date_str)
+                                                .font(FontId::new(13.0, FontFamily::Monospace))
+                                                .color(GOLD),
+                                        );
+                                    },
+                                );
+
+                                // Headline Column
+                                let headline_w = (ui.available_width() - 270.0).max(120.0);
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(headline_w, 24.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(&item.headline)
+                                                .font(FontId::new(14.0, FontFamily::Name("serif-bold".into())))
+                                                .color(INK),
+                                        );
+                                    },
+                                );
+
+                                // Articles Column
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(100.0, 24.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(format!("{} articles", item.articles_kept))
+                                                .font(FontId::new(12.0, FontFamily::Monospace))
+                                                .color(INK_FAINT),
+                                        );
+                                    },
+                                );
+
+                                // Actions Column
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("🗑 Delete")
+                                                    .font(FontId::new(11.0, FontFamily::Monospace))
+                                                    .color(ACCENT),
+                                            )
+                                            .fill(BG_RAISED)
+                                            .stroke(Stroke::new(1.0, RULE)),
+                                        )
+                                        .clicked()
+                                    {
+                                        delete_target = Some(item.date);
+                                    }
+
+                                    ui.add_space(8.0);
+
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("👁 View")
+                                                    .font(FontId::new(11.0, FontFamily::Monospace))
+                                                    .color(INK),
+                                            )
+                                            .fill(BG_RAISED)
+                                            .stroke(Stroke::new(1.0, RULE)),
+                                        )
+                                        .clicked()
+                                    {
+                                        navigate_target = Some(item.date);
+                                    }
+                                });
+                            });
+                        });
+                }
+
+                if let Some(target) = navigate_target {
+                    self.navigate(target);
+                }
+                if let Some(target) = delete_target {
+                    self.delete_brief_confirm_target = Some(target);
+                }
+            });
+    }
+
+    fn draw_history(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(920.0);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(overline("ARCHIVE"));
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("Briefing History")
+                                .font(FontId::new(32.0, FontFamily::Name("serif-bold".into())))
+                                .color(INK),
+                        );
+                        ui.add_space(4.0);
+                        let persona_name = self.personas[self.selected_persona_idx].name.clone();
+                        ui.label(
+                            RichText::new(format!(
+                                "Browse and manage stored daily intelligence briefings for persona: \"{}\".",
+                                persona_name
+                            ))
+                            .font(FontId::new(14.0, FontFamily::Name("serif".into())))
+                            .color(INK_DIM),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let back_label = if self.current_brief.is_some() {
+                            "← Back to Brief"
+                        } else {
+                            "← Back to Home"
+                        };
+                        if ui
+                            .button(
+                                RichText::new(back_label)
+                                    .font(FontId::new(12.0, FontFamily::Monospace))
+                                    .color(INK_DIM),
+                            )
+                            .clicked()
+                        {
+                            self.view = if self.current_brief.is_some() {
+                                View::Results
+                            } else {
+                                View::Idle
+                            };
+                        }
+                    });
+                });
+
+                ui.add_space(16.0);
+                draw_rule(ui);
+                ui.add_space(16.0);
+
+                self.draw_history_grid(ui);
+            });
+        });
+        ui.add_space(60.0);
+    }
+
+    fn draw_delete_brief_confirm_modal(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let target_date = match self.delete_brief_confirm_target {
+            Some(d) => d,
+            None => return,
+        };
+
+        let date_str = target_date.format("%B %d, %Y").to_string();
+
+        egui::Window::new("Confirm Deletion")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠️").font(FontId::proportional(26.0)));
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Delete Briefing?")
+                                .font(FontId::new(16.0, FontFamily::Name("serif-bold".into())))
+                                .color(INK),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "Are you sure you want to delete the briefing for {}? This action cannot be undone.",
+                                date_str
+                            ))
+                            .font(FontId::new(13.0, FontFamily::Name("serif".into())))
+                            .color(INK_DIM),
+                        );
+                    });
+                });
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Delete Briefing")
+                                        .font(FontId::new(12.0, FontFamily::Monospace))
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(ACCENT),
+                            )
+                            .clicked()
+                        {
+                            let persona_id = self.selected_persona_id();
+                            let _ = self.storage.delete_brief(target_date, persona_id);
+                            self.available_dates =
+                                self.storage.all_dates(persona_id).unwrap_or_default();
+                            if self.current_brief.as_ref().map(|b| b.date) == Some(target_date) {
+                                self.current_brief = None;
+                                if self.view == View::Results {
+                                    self.view = View::Idle;
+                                }
+                            }
+                            self.delete_brief_confirm_target = None;
+                        }
+                        ui.add_space(8.0);
+                        if ui
+                            .button(
+                                RichText::new("Cancel")
+                                    .font(FontId::new(12.0, FontFamily::Monospace))
+                                    .color(INK_DIM),
+                            )
+                            .clicked()
+                        {
+                            self.delete_brief_confirm_target = None;
+                        }
+                    });
+                });
+            });
+
+        if !open {
+            self.delete_brief_confirm_target = None;
+        }
     }
 
     fn draw_loading(&mut self, ui: &mut egui::Ui) {
@@ -2191,6 +2525,7 @@ fn topic_pill(ui: &mut egui::Ui, text: &str, active: bool) -> egui::Response {
     resp
 }
 
+#[allow(dead_code)]
 fn history_pill(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let resp = ui.add(
         egui::Button::new(
@@ -2419,6 +2754,7 @@ mod tests {
             editing_persona_idx: None,
             editing_feeds_text: String::new(),
             delete_confirm_target: None,
+            delete_brief_confirm_target: None,
             persona_export_path: String::new(),
             persona_import_path: String::new(),
             persona_message: String::new(),
@@ -2467,5 +2803,69 @@ mod tests {
         assert_eq!(app.view, View::PersonasConfig(PersonasSubView::List));
         assert_eq!(app.personas[0].feeds.len(), 2);
     }
+
+    #[test]
+    fn test_history_view_navigation() {
+        let storage = Storage::open_in_memory().expect("open memory storage");
+        let personas = storage.list_personas().unwrap_or_else(|_| vec![Persona::default()]);
+
+        // Save a brief into storage
+        let date = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+        let stats = BriefStats {
+            feeds_fetched: 3,
+            total_articles: 25,
+            articles_kept: 5,
+        };
+        storage.save(date, 1, "Tech Breakthroughs", "Brief content...", &[], &stats, "ollama:llama3").unwrap();
+
+        let mut app = FeedbriefApp {
+            runtime: Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap()),
+            storage,
+            view: View::Idle,
+            personas,
+            selected_persona_idx: 0,
+            editing_persona: Persona::default(),
+            editing_persona_idx: None,
+            editing_feeds_text: String::new(),
+            delete_confirm_target: None,
+            delete_brief_confirm_target: None,
+            persona_export_path: String::new(),
+            persona_import_path: String::new(),
+            persona_message: String::new(),
+            persona_message_is_error: false,
+            llm_config: LlmConfig::default(),
+            llm_settings_open: false,
+            hours: 24,
+            top_n: 20,
+            progress_rx: None,
+            progress_log: Arc::new(Mutex::new(Vec::new())),
+            current_stage: String::new(),
+            current_message: String::new(),
+            current_percent: 0,
+            current_brief: None,
+            topic_filter: String::new(),
+            llm_ok: false,
+            last_llm_check: std::time::Instant::now(),
+            llm_check_rx: None,
+            available_dates: vec![date],
+            publish_endpoint: String::new(),
+            publish_token: String::new(),
+            publish_settings_open: false,
+            publish_in_progress: false,
+            publish_result_msg: None,
+            publish_rx: None,
+        };
+
+        // Switch to History view
+        app.view = View::History;
+        assert_eq!(app.view, View::History);
+
+        // Navigate to date
+        app.navigate(date);
+        assert_eq!(app.view, View::Results);
+        assert!(app.current_brief.is_some());
+        assert_eq!(app.current_brief.unwrap().headline, "Tech Breakthroughs");
+    }
 }
+
 
