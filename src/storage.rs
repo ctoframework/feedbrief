@@ -185,6 +185,61 @@ impl Storage {
         Ok(Self { conn })
     }
 
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS personas (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                name             TEXT NOT NULL UNIQUE,
+                description      TEXT NOT NULL,
+                feeds_json       TEXT NOT NULL,
+                publish_endpoint TEXT NOT NULL DEFAULT 'http://localhost:3000/api/news-digest',
+                publish_token    TEXT NOT NULL DEFAULT 'YOUR_SECRET_KEY'
+            );
+
+            CREATE TABLE IF NOT EXISTS briefs (
+                date         TEXT NOT NULL,
+                persona_id   INTEGER NOT NULL DEFAULT 1,
+                headline     TEXT NOT NULL DEFAULT '',
+                brief_text   TEXT NOT NULL,
+                articles_json TEXT NOT NULL,
+                feeds_fetched INTEGER NOT NULL,
+                total_articles INTEGER NOT NULL,
+                articles_kept INTEGER NOT NULL,
+                model        TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                PRIMARY KEY (date, persona_id),
+                FOREIGN KEY (persona_id) REFERENCES personas(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        "#,
+        )?;
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM personas", [], |r| r.get(0))?;
+        if count == 0 {
+            let default_persona = Persona::default();
+            let feeds_json = serde_json::to_string(&default_persona.feeds)?;
+            conn.execute(
+                "INSERT INTO personas (id, name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?)",
+                params![
+                    1,
+                    default_persona.name,
+                    default_persona.description,
+                    feeds_json,
+                    default_persona.publish_endpoint,
+                    default_persona.publish_token,
+                ],
+            )?;
+        }
+
+        Ok(Self { conn })
+    }
+
     pub fn list_personas(&self) -> Result<Vec<Persona>> {
         let mut stmt = self
             .conn

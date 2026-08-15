@@ -23,11 +23,18 @@ const ACCENT: Color32 = Color32::from_rgb(255, 87, 34);
 const GOLD: Color32 = Color32::from_rgb(212, 168, 87);
 const GREEN: Color32 = Color32::from_rgb(126, 184, 143);
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Debug)]
+pub enum PersonasSubView {
+    List,
+    Form { index: Option<usize> },
+}
+
+#[derive(PartialEq, Clone, Debug)]
 enum View {
     Idle,
     Loading,
     Results,
+    PersonasConfig(PersonasSubView),
 }
 
 // Published structs imported from publish module
@@ -39,7 +46,10 @@ pub struct FeedbriefApp {
 
     personas: Vec<Persona>,
     selected_persona_idx: usize,
-    persona_manager_open: bool,
+    editing_persona: Persona,
+    editing_persona_idx: Option<usize>,
+    editing_feeds_text: String,
+    delete_confirm_target: Option<usize>,
     persona_export_path: String,
     persona_import_path: String,
     persona_message: String,
@@ -144,7 +154,10 @@ impl FeedbriefApp {
             view,
             personas,
             selected_persona_idx,
-            persona_manager_open: false,
+            editing_persona: Persona::default(),
+            editing_persona_idx: None,
+            editing_feeds_text: String::new(),
+            delete_confirm_target: None,
             persona_export_path: Storage::personas_config_path().display().to_string(),
             persona_import_path: Storage::personas_config_path().display().to_string(),
             persona_message: String::new(),
@@ -309,15 +322,16 @@ impl eframe::App for FeedbriefApp {
                 self.draw_masthead(ui);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| match self.view {
+                    .show(ui, |ui| match self.view.clone() {
                         View::Idle => self.draw_idle(ui),
                         View::Loading => self.draw_loading(ui),
                         View::Results => self.draw_results(ui),
+                        View::PersonasConfig(sub) => self.draw_personas_config(ui, &sub),
                     });
             });
 
-        if self.persona_manager_open {
-            self.draw_persona_manager(ctx);
+        if self.delete_confirm_target.is_some() {
+            self.draw_delete_confirm_modal(ctx);
         }
         if self.llm_settings_open {
             self.draw_llm_settings(ctx);
@@ -368,7 +382,13 @@ impl FeedbriefApp {
             .iter()
             .position(|persona| persona.id == Some(selected_id))
             .unwrap_or(0);
-        self.select_persona_by_index(idx);
+        self.selected_persona_idx = idx.min(self.personas.len() - 1);
+        if let Some(persona) = self.personas.get(self.selected_persona_idx) {
+            self.publish_endpoint = persona.publish_endpoint.clone();
+            self.publish_token = persona.publish_token.clone();
+        }
+        let persona_id = self.selected_persona_id();
+        self.available_dates = self.storage.all_dates(persona_id).unwrap_or_default();
     }
 
     fn resolve_persona_path(input: &str, default: PathBuf) -> PathBuf {
@@ -490,11 +510,50 @@ impl FeedbriefApp {
                                     }
                                 }
                                 ui.separator();
-                                if ui.button("+ Manage Personas").clicked() {
-                                    self.persona_manager_open = true;
+                                if ui.button("⚙ Personas Config").clicked() {
+                                    self.view = View::PersonasConfig(PersonasSubView::List);
                                     ui.close_menu();
                                 }
                             });
+                    });
+
+                    // Navigation Tabs
+                    ui.add_space(24.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("NAVIGATE")
+                                .font(FontId::new(9.5, FontFamily::Monospace))
+                                .color(INK_FAINT),
+                        );
+                        ui.horizontal(|ui| {
+                            let is_personas = matches!(self.view, View::PersonasConfig(_));
+                            if ui
+                                .selectable_label(
+                                    !is_personas,
+                                    RichText::new("📰 Brief")
+                                        .font(FontId::new(13.0, FontFamily::Monospace))
+                                        .color(if !is_personas { GOLD } else { INK_DIM }),
+                                )
+                                .clicked()
+                            {
+                                self.view = if self.current_brief.is_some() {
+                                    View::Results
+                                } else {
+                                    View::Idle
+                                };
+                            }
+                            if ui
+                                .selectable_label(
+                                    is_personas,
+                                    RichText::new("⚙ Config")
+                                        .font(FontId::new(13.0, FontFamily::Monospace))
+                                        .color(if is_personas { GOLD } else { INK_DIM }),
+                                )
+                                .clicked()
+                            {
+                                self.view = View::PersonasConfig(PersonasSubView::List);
+                            }
+                        });
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -528,193 +587,751 @@ impl FeedbriefApp {
         draw_rule(ui);
     }
 
-    fn draw_persona_manager(&mut self, ctx: &egui::Context) {
-        let mut open = self.persona_manager_open;
-        egui::Window::new("Manage Personas")
+    fn start_edit_persona(&mut self, idx: usize) {
+        if let Some(persona) = self.personas.get(idx) {
+            self.editing_persona_idx = Some(idx);
+            self.editing_persona = persona.clone();
+            self.editing_feeds_text = persona
+                .feeds
+                .iter()
+                .map(|f| f.url.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.persona_message.clear();
+            self.view = View::PersonasConfig(PersonasSubView::Form { index: Some(idx) });
+        }
+    }
+
+    fn start_add_persona(&mut self) {
+        self.editing_persona_idx = None;
+        self.editing_persona = Persona {
+            id: None,
+            name: "New Persona".into(),
+            description: "".into(),
+            feeds: vec![],
+            publish_endpoint: "http://localhost:3000/api/news-digest".to_string(),
+            publish_token: "YOUR_SECRET_KEY".to_string(),
+        };
+        self.editing_feeds_text = String::new();
+        self.persona_message.clear();
+        self.view = View::PersonasConfig(PersonasSubView::Form { index: None });
+    }
+
+    fn save_editing_persona(&mut self) {
+        self.editing_persona.feeds = self
+            .editing_feeds_text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| crate::feeds::FeedSource {
+                name: l.split('/').last().unwrap_or("Feed").to_string(),
+                url: l.trim().to_string(),
+                category: "General".to_string(),
+            })
+            .collect();
+
+        match self.storage.save_persona(&self.editing_persona) {
+            Ok(saved_id) => {
+                self.editing_persona.id = Some(saved_id);
+                self.reload_personas(Some(saved_id));
+                self.persona_message_is_error = false;
+                self.persona_message =
+                    format!("Persona '{}' saved successfully.", self.editing_persona.name);
+                self.view = View::PersonasConfig(PersonasSubView::List);
+            }
+            Err(err) => {
+                self.persona_message_is_error = true;
+                self.persona_message = format!("Failed to save persona: {}", err);
+            }
+        }
+    }
+
+    fn draw_delete_confirm_modal(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let target_idx = match self.delete_confirm_target {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        let persona_name = self
+            .personas
+            .get(target_idx)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+
+        egui::Window::new("Confirm Deletion")
             .open(&mut open)
             .collapsible(false)
-            .resizable(true)
-            .default_width(600.0)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_width(420.0)
             .show(ctx, |ui| {
-                ui.label("Create and edit your news personas.");
-                ui.add_space(10.0);
-
-                ui.group(|ui| {
-                    ui.label(
-                        RichText::new("PERSONA CONFIG BACKUP")
-                            .font(FontId::new(9.0, FontFamily::Monospace))
-                            .color(INK_FAINT),
-                    );
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new("EXPORT JSON PATH")
-                                    .font(FontId::new(9.0, FontFamily::Monospace))
-                                    .color(INK_FAINT),
-                            );
-                            ui.text_edit_singleline(&mut self.persona_export_path);
-                        });
-                        if ui.button("Export JSON").clicked() {
-                            self.export_personas_config();
-                        }
-                    });
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new("IMPORT JSON PATH")
-                                    .font(FontId::new(9.0, FontFamily::Monospace))
-                                    .color(INK_FAINT),
-                            );
-                            ui.text_edit_singleline(&mut self.persona_import_path);
-                        });
-                        if ui.button("Import JSON").clicked() {
-                            self.import_personas_config();
-                        }
-                    });
-                    if !self.persona_message.is_empty() {
-                        ui.add_space(6.0);
-                        let color = if self.persona_message_is_error {
-                            ACCENT
-                        } else {
-                            GREEN
-                        };
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠️").font(FontId::proportional(26.0)));
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
                         ui.label(
-                            RichText::new(&self.persona_message)
-                                .font(FontId::new(10.0, FontFamily::Monospace))
-                                .color(color),
+                            RichText::new("Delete Persona?")
+                                .font(FontId::new(16.0, FontFamily::Name("serif-bold".into())))
+                                .color(INK),
                         );
-                    }
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "Are you sure you want to delete \"{}\"? This action cannot be undone.",
+                                persona_name
+                            ))
+                            .font(FontId::new(13.0, FontFamily::Name("serif".into())))
+                            .color(INK_DIM),
+                        );
+                    });
+                });
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Delete Persona")
+                                        .font(FontId::new(12.0, FontFamily::Monospace))
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(ACCENT),
+                            )
+                            .clicked()
+                        {
+                            if let Some(persona) = self.personas.get(target_idx) {
+                                if let Some(id) = persona.id {
+                                    let _ = self.storage.delete_persona(id);
+                                }
+                            }
+                            self.personas.remove(target_idx);
+                            if self.personas.is_empty() {
+                                self.personas.push(Persona::default());
+                            }
+                            if self.selected_persona_idx >= self.personas.len() {
+                                self.selected_persona_idx = 0;
+                            }
+                            let selected_id = self.selected_persona_id();
+                            self.reload_personas(Some(selected_id));
+                            self.persona_message_is_error = false;
+                            self.persona_message = format!("Persona '{}' deleted.", persona_name);
+                            self.delete_confirm_target = None;
+                        }
+                        ui.add_space(8.0);
+                        if ui
+                            .add(egui::Button::new(
+                                RichText::new("Cancel")
+                                    .font(FontId::new(12.0, FontFamily::Monospace))
+                                    .color(INK_DIM),
+                            ))
+                            .clicked()
+                        {
+                            self.delete_confirm_target = None;
+                        }
+                    });
+                });
+            });
+
+        if !open {
+            self.delete_confirm_target = None;
+        }
+    }
+
+    fn draw_personas_config(&mut self, ui: &mut egui::Ui, sub: &PersonasSubView) {
+        match sub {
+            PersonasSubView::List => self.draw_personas_list(ui),
+            PersonasSubView::Form { index } => self.draw_persona_form(ui, *index),
+        }
+    }
+
+    fn draw_personas_list(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(920.0);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(overline("CONFIGURATION"));
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new("Personas & Feeds")
+                                .font(FontId::new(32.0, FontFamily::Name("serif-bold".into())))
+                                .color(INK),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(
+                                "Configure topic personas, news feeds, and publishing endpoints.",
+                            )
+                            .font(FontId::new(14.0, FontFamily::Name("serif".into())))
+                            .color(INK_DIM),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let back_label = if self.current_brief.is_some() {
+                            "← Back to Brief"
+                        } else {
+                            "← Back to Home"
+                        };
+                        if ui
+                            .button(
+                                RichText::new(back_label)
+                                    .font(FontId::new(12.0, FontFamily::Monospace))
+                                    .color(INK_DIM),
+                            )
+                            .clicked()
+                        {
+                            self.view = if self.current_brief.is_some() {
+                                View::Results
+                            } else {
+                                View::Idle
+                            };
+                        }
+                        ui.add_space(12.0);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("+ Add New Persona")
+                                        .font(FontId::new(12.0, FontFamily::Monospace))
+                                        .color(BG),
+                                )
+                                .fill(GOLD),
+                            )
+                            .clicked()
+                        {
+                            self.start_add_persona();
+                        }
+                    });
                 });
 
-                ui.add_space(10.0);
-                let mut to_delete = None;
-                let mut to_save = None;
+                ui.add_space(16.0);
+                draw_rule(ui);
+                ui.add_space(16.0);
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (i, persona) in self.personas.iter_mut().enumerate() {
-                        ui.group(|ui| {
+                if !self.persona_message.is_empty() {
+                    let color = if self.persona_message_is_error {
+                        ACCENT
+                    } else {
+                        GREEN
+                    };
+                    egui::Frame::none()
+                        .fill(BG_RAISED)
+                        .stroke(Stroke::new(1.0, color))
+                        .inner_margin(egui::Margin::same(10.0))
+                        .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(&self.persona_message)
+                                        .font(FontId::new(11.0, FontFamily::Monospace))
+                                        .color(color),
+                                );
+                            });
+                        });
+                    ui.add_space(16.0);
+                }
+
+                // Table Header
+                egui::Frame::none()
+                    .fill(BG_RAISED)
+                    .inner_margin(egui::Margin {
+                        left: 16.0,
+                        right: 16.0,
+                        top: 8.0,
+                        bottom: 8.0,
+                    })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(45.0, 18.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
                                     ui.label(
-                                        RichText::new("NAME")
-                                            .font(FontId::new(9.0, FontFamily::Monospace))
+                                        RichText::new("ID")
+                                            .font(FontId::new(9.5, FontFamily::Monospace))
                                             .color(INK_FAINT),
                                     );
-                                    ui.text_edit_singleline(&mut persona.name);
-                                });
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Min),
+                                },
+                            );
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(280.0, 18.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new("NAME & FOCUS DESCRIPTION")
+                                            .font(FontId::new(9.5, FontFamily::Monospace))
+                                            .color(INK_FAINT),
+                                    );
+                                },
+                            );
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(90.0, 18.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new("FEEDS")
+                                            .font(FontId::new(9.5, FontFamily::Monospace))
+                                            .color(INK_FAINT),
+                                    );
+                                },
+                            );
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(200.0, 18.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new("PUBLISH ENDPOINT")
+                                            .font(FontId::new(9.5, FontFamily::Monospace))
+                                            .color(INK_FAINT),
+                                    );
+                                },
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new("ACTIONS")
+                                            .font(FontId::new(9.5, FontFamily::Monospace))
+                                            .color(INK_FAINT),
+                                    );
+                                },
+                            );
+                        });
+                    });
+                ui.add_space(4.0);
+
+                let persona_count = self.personas.len();
+                let mut edit_target = None;
+                let mut delete_target = None;
+                let mut select_target = None;
+
+                for i in 0..persona_count {
+                    let persona = &self.personas[i];
+                    let is_selected = self.selected_persona_idx == i;
+                    let is_default = persona.id == Some(1);
+
+                    egui::Frame::none()
+                        .fill(if is_selected { BG_PAPER } else { BG_RAISED })
+                        .stroke(Stroke::new(1.0, if is_selected { GOLD } else { RULE }))
+                        .inner_margin(egui::Margin {
+                            left: 16.0,
+                            right: 16.0,
+                            top: 12.0,
+                            bottom: 12.0,
+                        })
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                // ID Column
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(45.0, 36.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
-                                        if persona.id != Some(1) {
+                                        let id_str = persona
+                                            .id
+                                            .map(|id| format!("#{}", id))
+                                            .unwrap_or_else(|| "New".into());
+                                        ui.label(
+                                            RichText::new(id_str)
+                                                .font(FontId::new(11.0, FontFamily::Monospace))
+                                                .color(GOLD),
+                                        );
+                                    },
+                                );
+
+                                // Name & Description Column
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(280.0, 36.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new(&persona.name)
+                                                        .font(FontId::new(
+                                                            15.0,
+                                                            FontFamily::Name("serif-bold".into()),
+                                                        ))
+                                                        .color(INK),
+                                                );
+                                                if is_selected {
+                                                    ui.label(
+                                                        RichText::new("● Active")
+                                                            .font(FontId::new(
+                                                                9.0,
+                                                                FontFamily::Monospace,
+                                                            ))
+                                                            .color(GREEN),
+                                                    );
+                                                }
+                                            });
+                                            let desc_preview = if persona.description.len() > 65 {
+                                                format!("{}...", &persona.description[..65])
+                                            } else {
+                                                persona.description.clone()
+                                            };
+                                            ui.label(
+                                                RichText::new(desc_preview)
+                                                    .font(FontId::new(
+                                                        11.0,
+                                                        FontFamily::Name("serif".into()),
+                                                    ))
+                                                    .color(INK_DIM),
+                                            );
+                                        });
+                                    },
+                                );
+
+                                // Feeds Column
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(90.0, 36.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(format!("{} feeds", persona.feeds.len()))
+                                                .font(FontId::new(11.0, FontFamily::Monospace))
+                                                .color(INK_DIM),
+                                        );
+                                    },
+                                );
+
+                                // Endpoint Column
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(200.0, 36.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        let ep_short = if persona.publish_endpoint.len() > 25 {
+                                            format!("{}...", &persona.publish_endpoint[..25])
+                                        } else {
+                                            persona.publish_endpoint.clone()
+                                        };
+                                        ui.label(
+                                            RichText::new(ep_short)
+                                                .font(FontId::new(10.0, FontFamily::Monospace))
+                                                .color(INK_FAINT),
+                                        );
+                                    },
+                                );
+
+                                // Actions Column
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let can_delete = !is_default && persona_count > 1;
+                                        let delete_btn = egui::Button::new(
+                                            RichText::new("🗑 Delete")
+                                                .font(FontId::new(11.0, FontFamily::Monospace))
+                                                .color(if can_delete { ACCENT } else { INK_FAINT }),
+                                        );
+                                        if ui.add_enabled(can_delete, delete_btn).clicked() {
+                                            delete_target = Some(i);
+                                        }
+
+                                        ui.add_space(6.0);
+
+                                        if ui
+                                            .button(
+                                                RichText::new("✏ Edit")
+                                                    .font(FontId::new(11.0, FontFamily::Monospace))
+                                                    .color(GOLD),
+                                            )
+                                            .clicked()
+                                        {
+                                            edit_target = Some(i);
+                                        }
+
+                                        if !is_selected {
+                                            ui.add_space(6.0);
                                             if ui
-                                                .button("🗑")
-                                                .on_hover_text("Delete Persona")
+                                                .button(
+                                                    RichText::new("Use Persona")
+                                                        .font(FontId::new(
+                                                            10.0,
+                                                            FontFamily::Monospace,
+                                                        ))
+                                                        .color(INK_DIM),
+                                                )
                                                 .clicked()
                                             {
-                                                to_delete = Some(i);
+                                                select_target = Some(i);
                                             }
                                         }
                                     },
                                 );
                             });
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new("DESCRIPTION")
-                                    .font(FontId::new(9.0, FontFamily::Monospace))
-                                    .color(INK_FAINT),
-                            );
-                            ui.text_edit_multiline(&mut persona.description);
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new("FEEDS (one URL per line)")
-                                    .font(FontId::new(9.0, FontFamily::Monospace))
-                                    .color(INK_FAINT),
-                            );
-                            let mut feeds_text = persona
-                                .feeds
-                                .iter()
-                                .map(|f| f.url.clone())
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            if ui.text_edit_multiline(&mut feeds_text).changed() {
-                                persona.feeds = feeds_text
-                                    .lines()
-                                    .filter(|l| !l.trim().is_empty())
-                                    .map(|l| crate::feeds::FeedSource {
-                                        name: l.split('/').last().unwrap_or("Feed").to_string(),
-                                        url: l.to_string(),
-                                        category: "General".to_string(),
-                                    })
-                                    .collect();
-                            }
+                        });
+                    ui.add_space(6.0);
+                }
 
+                if let Some(i) = edit_target {
+                    self.start_edit_persona(i);
+                }
+                if let Some(i) = delete_target {
+                    self.delete_confirm_target = Some(i);
+                }
+                if let Some(i) = select_target {
+                    self.select_persona_by_index(i);
+                }
+
+                ui.add_space(20.0);
+
+                // JSON Backup / Export & Import
+                egui::CollapsingHeader::new(
+                    RichText::new("⚙ Persona Config Backup & Restore (JSON Export / Import)")
+                        .font(FontId::new(11.0, FontFamily::Monospace))
+                        .color(INK_DIM),
+                )
+                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new("EXPORT JSON PATH")
+                                        .font(FontId::new(9.0, FontFamily::Monospace))
+                                        .color(INK_FAINT),
+                                );
+                                ui.text_edit_singleline(&mut self.persona_export_path);
+                            });
+                            if ui.button("Export JSON").clicked() {
+                                self.export_personas_config();
+                            }
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new("IMPORT JSON PATH")
+                                        .font(FontId::new(9.0, FontFamily::Monospace))
+                                        .color(INK_FAINT),
+                                );
+                                ui.text_edit_singleline(&mut self.persona_import_path);
+                            });
+                            if ui.button("Import JSON").clicked() {
+                                self.import_personas_config();
+                            }
+                        });
+                    });
+                });
+
+                ui.add_space(40.0);
+            });
+        });
+    }
+
+    fn draw_persona_form(&mut self, ui: &mut egui::Ui, index: Option<usize>) {
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(780.0);
+            ui.vertical(|ui| {
+                let is_new = index.is_none();
+                let title_text = if is_new {
+                    "Create New Persona".to_string()
+                } else {
+                    format!("Edit Persona: {}", self.editing_persona.name)
+                };
+
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(overline(if is_new { "NEW PERSONA" } else { "EDIT PERSONA" }));
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(title_text)
+                                .font(FontId::new(28.0, FontFamily::Name("serif-bold".into())))
+                                .color(INK),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(
+                                RichText::new("← Back to Personas List")
+                                    .font(FontId::new(12.0, FontFamily::Monospace))
+                                    .color(INK_DIM),
+                            )
+                            .clicked()
+                        {
+                            self.persona_message.clear();
+                            self.view = View::PersonasConfig(PersonasSubView::List);
+                        }
+                    });
+                });
+
+                ui.add_space(16.0);
+                draw_rule(ui);
+                ui.add_space(16.0);
+
+                if !self.persona_message.is_empty() {
+                    let color = if self.persona_message_is_error {
+                        ACCENT
+                    } else {
+                        GREEN
+                    };
+                    ui.label(
+                        RichText::new(&self.persona_message)
+                            .font(FontId::new(11.0, FontFamily::Monospace))
+                            .color(color),
+                    );
+                    ui.add_space(10.0);
+                }
+
+                // Form Container
+                egui::Frame::none()
+                    .fill(BG_RAISED)
+                    .stroke(Stroke::new(1.0, RULE))
+                    .inner_margin(egui::Margin::same(20.0))
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            // PERSONA NAME
+                            ui.label(
+                                RichText::new("PERSONA NAME")
+                                    .font(FontId::new(9.5, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
                             ui.add_space(4.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.editing_persona.name)
+                                    .desired_width(f32::INFINITY)
+                                    .font(FontId::new(14.0, FontFamily::Name("serif".into()))),
+                            );
+
+                            ui.add_space(16.0);
+
+                            // DESCRIPTION
+                            ui.label(
+                                RichText::new("TOPIC & FOCUS DESCRIPTION")
+                                    .font(FontId::new(9.5, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                            ui.add_space(2.0);
+                            ui.label(
+                                RichText::new(
+                                    "Describe key topics, technologies, or domains for summary distillation.",
+                                )
+                                .font(FontId::new(11.0, FontFamily::Name("serif-italic".into())))
+                                .color(INK_FAINT),
+                            );
+                            ui.add_space(4.0);
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.editing_persona.description)
+                                    .desired_rows(3)
+                                    .desired_width(f32::INFINITY)
+                                    .font(FontId::new(13.0, FontFamily::Name("serif".into()))),
+                            );
+
+                            ui.add_space(16.0);
+
+                            // FEEDS
+                            let feed_count = self
+                                .editing_feeds_text
+                                .lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .count();
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("FEED SOURCES (RSS/ATOM URLS - ONE PER LINE)")
+                                        .font(FontId::new(9.5, FontFamily::Monospace))
+                                        .color(INK_FAINT),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(format!("{} feeds", feed_count))
+                                                .font(FontId::new(9.5, FontFamily::Monospace))
+                                                .color(GOLD),
+                                        );
+                                    },
+                                );
+                            });
+                            ui.add_space(4.0);
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.editing_feeds_text)
+                                    .desired_rows(8)
+                                    .desired_width(f32::INFINITY)
+                                    .font(FontId::new(12.0, FontFamily::Monospace)),
+                            );
+
+                            ui.add_space(16.0);
+
+                            // PUBLISHING ENDPOINT & TOKEN
+                            ui.label(
+                                RichText::new("PUBLISHING CONFIGURATION")
+                                    .font(FontId::new(9.5, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                            ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(
-                                        RichText::new("PUBLISH ENDPOINT")
+                                        RichText::new("ENDPOINT URL")
                                             .font(FontId::new(9.0, FontFamily::Monospace))
                                             .color(INK_FAINT),
                                     );
-                                    ui.text_edit_singleline(&mut persona.publish_endpoint);
+                                    ui.add_space(2.0);
+                                    ui.add(
+                                        egui::TextEdit::singleline(
+                                            &mut self.editing_persona.publish_endpoint,
+                                        )
+                                        .desired_width(340.0)
+                                        .font(FontId::new(12.0, FontFamily::Monospace)),
+                                    );
                                 });
                                 ui.add_space(16.0);
                                 ui.vertical(|ui| {
                                     ui.label(
-                                        RichText::new("PUBLISH TOKEN")
+                                        RichText::new("BEARER TOKEN")
                                             .font(FontId::new(9.0, FontFamily::Monospace))
                                             .color(INK_FAINT),
                                     );
-                                    ui.text_edit_singleline(&mut persona.publish_token);
+                                    ui.add_space(2.0);
+                                    ui.add(
+                                        egui::TextEdit::singleline(
+                                            &mut self.editing_persona.publish_token,
+                                        )
+                                        .desired_width(340.0)
+                                        .password(true)
+                                        .font(FontId::new(12.0, FontFamily::Monospace)),
+                                    );
                                 });
                             });
-                            ui.add_space(6.0);
 
-                            if ui.button("Save Changes").clicked() {
-                                to_save = Some(i);
-                            }
+                            ui.add_space(24.0);
+                            draw_rule(ui);
+                            ui.add_space(16.0);
+
+                            // Action buttons
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("💾 Save Persona")
+                                                .font(FontId::new(12.0, FontFamily::Monospace))
+                                                .color(BG),
+                                        )
+                                        .fill(GOLD),
+                                    )
+                                    .clicked()
+                                {
+                                    self.save_editing_persona();
+                                }
+                                ui.add_space(12.0);
+                                if ui
+                                    .button(
+                                        RichText::new("Cancel")
+                                            .font(FontId::new(12.0, FontFamily::Monospace))
+                                            .color(INK_DIM),
+                                    )
+                                    .clicked()
+                                {
+                                    self.persona_message.clear();
+                                    self.view = View::PersonasConfig(PersonasSubView::List);
+                                }
+                            });
                         });
-                        ui.add_space(10.0);
-                    }
-                });
-
-                if let Some(idx) = to_delete {
-                    if let Some(id) = self.personas[idx].id {
-                        let _ = self.storage.delete_persona(id);
-                    }
-                    self.personas.remove(idx);
-                    if self.personas.is_empty() {
-                        self.personas.push(Persona::default());
-                    }
-                    if self.selected_persona_idx >= self.personas.len() {
-                        self.selected_persona_idx = 0;
-                    }
-                    self.select_persona_by_index(self.selected_persona_idx);
-                }
-
-                if let Some(idx) = to_save {
-                    let _ = self.storage.save_persona(&self.personas[idx]);
-                    if idx == self.selected_persona_idx {
-                        self.publish_endpoint = self.personas[idx].publish_endpoint.clone();
-                        self.publish_token = self.personas[idx].publish_token.clone();
-                    }
-                }
-
-                ui.separator();
-                if ui.button("+ Add New Persona").clicked() {
-                    self.personas.push(Persona {
-                        id: None,
-                        name: "New Persona".into(),
-                        description: "What are you looking for?".into(),
-                        feeds: vec![],
-                        publish_endpoint: "http://localhost:3000/api/news-digest".to_string(),
-                        publish_token: "YOUR_SECRET_KEY".to_string(),
                     });
-                }
+
+                ui.add_space(40.0);
             });
-        self.persona_manager_open = open;
+        });
     }
 
     fn draw_llm_settings(&mut self, ctx: &egui::Context) {
@@ -1783,4 +2400,72 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-// Tests moved to publish.rs
+// Tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_personas_subview_transitions() {
+        let storage = Storage::open_in_memory().expect("open memory storage");
+        let personas = storage.list_personas().unwrap_or_else(|_| vec![Persona::default()]);
+        let mut app = FeedbriefApp {
+            runtime: Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap()),
+            storage,
+            view: View::Idle,
+            personas: personas.clone(),
+            selected_persona_idx: 0,
+            editing_persona: Persona::default(),
+            editing_persona_idx: None,
+            editing_feeds_text: String::new(),
+            delete_confirm_target: None,
+            persona_export_path: String::new(),
+            persona_import_path: String::new(),
+            persona_message: String::new(),
+            persona_message_is_error: false,
+            llm_config: LlmConfig::default(),
+            llm_settings_open: false,
+            hours: 24,
+            top_n: 20,
+            progress_rx: None,
+            progress_log: Arc::new(Mutex::new(Vec::new())),
+            current_stage: String::new(),
+            current_message: String::new(),
+            current_percent: 0,
+            current_brief: None,
+            topic_filter: String::new(),
+            llm_ok: false,
+            last_llm_check: std::time::Instant::now(),
+            llm_check_rx: None,
+            available_dates: vec![],
+            publish_endpoint: String::new(),
+            publish_token: String::new(),
+            publish_settings_open: false,
+            publish_in_progress: false,
+            publish_result_msg: None,
+            publish_rx: None,
+        };
+
+        // Initially in Idle view
+        assert_eq!(app.view, View::Idle);
+
+        // Start add persona -> switches to Form view with None index
+        app.start_add_persona();
+        assert_eq!(app.view, View::PersonasConfig(PersonasSubView::Form { index: None }));
+        assert_eq!(app.editing_persona.name, "New Persona");
+
+        // Start edit persona -> switches to Form view with Some(0) index
+        app.start_edit_persona(0);
+        assert_eq!(app.view, View::PersonasConfig(PersonasSubView::Form { index: Some(0) }));
+        assert_eq!(app.editing_persona.name, personas[0].name);
+
+        // Edit feeds and save
+        app.editing_feeds_text = "https://example.com/rss.xml\nhttps://test.com/feed".to_string();
+        app.save_editing_persona();
+
+        // After saving -> returns to List view
+        assert_eq!(app.view, View::PersonasConfig(PersonasSubView::List));
+        assert_eq!(app.personas[0].feeds.len(), 2);
+    }
+}
+
