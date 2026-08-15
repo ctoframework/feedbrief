@@ -308,7 +308,39 @@ impl FeedbriefApp {
             self.view = View::Results;
         }
     }
+
+    pub fn remove_article(&mut self, url: &str) {
+        if let Some(brief) = &mut self.current_brief {
+            let orig_len = brief.articles.len();
+            brief.articles.retain(|a| a.url != url);
+            if brief.articles.len() < orig_len {
+                brief.stats.articles_kept = brief.articles.len();
+                let persona_id = self.personas[self.selected_persona_idx].id.unwrap_or(1);
+                if let Err(e) = self.storage.save(
+                    brief.date,
+                    persona_id,
+                    &brief.headline,
+                    &brief.brief,
+                    &brief.articles,
+                    &brief.stats,
+                    &brief.model,
+                ) {
+                    eprintln!("Failed to save brief after article removal: {}", e);
+                }
+                self.available_dates = self.storage.all_dates(persona_id).unwrap_or_default();
+                if self.topic_filter != "all"
+                    && !brief
+                        .articles
+                        .iter()
+                        .any(|a| a.topic_tag.as_deref() == Some(&self.topic_filter))
+                {
+                    self.topic_filter = "all".to_string();
+                }
+            }
+        }
+    }
 }
+
 
 impl eframe::App for FeedbriefApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -2302,7 +2334,9 @@ impl FeedbriefApp {
 
                 self.draw_filter_bar(ui, &brief.articles);
                 ui.add_space(24.0);
-                self.draw_articles(ui, &brief.articles);
+                if let Some(url_to_remove) = self.draw_articles(ui, &brief.articles) {
+                    self.remove_article(&url_to_remove);
+                }
 
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
@@ -2405,13 +2439,48 @@ impl FeedbriefApp {
         });
     }
 
-    fn draw_articles(&mut self, ui: &mut egui::Ui, articles: &[Article]) {
+    fn draw_articles(&mut self, ui: &mut egui::Ui, articles: &[Article]) -> Option<String> {
+        if articles.is_empty() {
+            egui::Frame::none()
+                .fill(BG_RAISED)
+                .stroke(Stroke::new(1.0, RULE))
+                .inner_margin(egui::Margin::same(24.0))
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("No articles remaining in this briefing.")
+                                .font(FontId::new(14.0, FontFamily::Name("serif-italic".into())))
+                                .color(INK_FAINT),
+                        );
+                    });
+                });
+            return None;
+        }
+
         let filter = self.topic_filter.clone();
         let filtered: Vec<&Article> = articles
             .iter()
             .filter(|a| filter == "all" || a.topic_tag.as_deref() == Some(&filter))
             .collect();
 
+        if filtered.is_empty() {
+            egui::Frame::none()
+                .fill(BG_RAISED)
+                .stroke(Stroke::new(1.0, RULE))
+                .inner_margin(egui::Margin::same(24.0))
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("No articles matching topic filter.")
+                                .font(FontId::new(14.0, FontFamily::Name("serif-italic".into())))
+                                .color(INK_FAINT),
+                        );
+                    });
+                });
+            return None;
+        }
+
+        let mut article_to_remove = None;
         let col_w = (ui.available_width() - 24.0) / 2.0;
         for chunk in filtered.chunks(2) {
             ui.horizontal_top(|ui| {
@@ -2419,13 +2488,19 @@ impl FeedbriefApp {
                     ui.allocate_ui_with_layout(
                         Vec2::new(col_w, 0.0),
                         egui::Layout::top_down(egui::Align::LEFT),
-                        |ui| draw_article_card(ui, article),
+                        |ui| {
+                            if draw_article_card(ui, article) {
+                                article_to_remove = Some(article.url.clone());
+                            }
+                        },
                     );
                     ui.add_space(20.0);
                 }
             });
             ui.add_space(20.0);
         }
+
+        article_to_remove
     }
 }
 
@@ -2540,7 +2615,8 @@ fn history_pill(ui: &mut egui::Ui, text: &str) -> egui::Response {
     resp
 }
 
-fn draw_article_card(ui: &mut egui::Ui, article: &Article) {
+fn draw_article_card(ui: &mut egui::Ui, article: &Article) -> bool {
+    let mut remove_clicked = false;
     egui::Frame::none()
         .fill(BG_PAPER)
         .inner_margin(egui::Margin::same(20.0))
@@ -2607,22 +2683,44 @@ fn draw_article_card(ui: &mut egui::Ui, article: &Article) {
             );
 
             ui.add_space(14.0);
-            let resp = ui.add(
-                egui::Label::new(
-                    RichText::new("READ AT SOURCE  →")
-                        .font(FontId::new(9.5, FontFamily::Monospace))
-                        .color(ACCENT),
-                )
-                .sense(egui::Sense::click()),
-            );
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            if resp.clicked() {
-                let _ = open::that(&article.url);
-            }
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::Label::new(
+                        RichText::new("READ AT SOURCE  →")
+                            .font(FontId::new(9.5, FontFamily::Monospace))
+                            .color(ACCENT),
+                    )
+                    .sense(egui::Sense::click()),
+                );
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if resp.clicked() {
+                    let _ = open::that(&article.url);
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let remove_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new("🗑 Remove")
+                                .font(FontId::new(10.0, FontFamily::Monospace))
+                                .color(ACCENT),
+                        )
+                        .fill(BG_RAISED)
+                        .stroke(Stroke::new(1.0, RULE)),
+                    );
+                    if remove_btn.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if remove_btn.clicked() {
+                        remove_clicked = true;
+                    }
+                });
+            });
         });
+    remove_clicked
 }
+
 
 fn configure_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
@@ -2866,6 +2964,105 @@ mod tests {
         assert!(app.current_brief.is_some());
         assert_eq!(app.current_brief.unwrap().headline, "Tech Breakthroughs");
     }
+
+    #[test]
+    fn test_app_remove_article() {
+        let storage = Storage::open_in_memory().expect("open memory storage");
+        let personas = storage.list_personas().unwrap_or_else(|_| vec![Persona::default()]);
+        let date = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+
+        let a1 = Article {
+            id: "a".to_string(),
+            title: "Item A".to_string(),
+            url: "https://example.com/a".to_string(),
+            source: "Source A".to_string(),
+            category: "Tech".to_string(),
+            published: chrono::Utc::now(),
+            summary: "Summary A".to_string(),
+            ai_summary: None,
+            relevance: Some(9.0),
+            topic_tag: Some("tech".to_string()),
+        };
+        let a2 = Article {
+            id: "b".to_string(),
+            title: "Item B".to_string(),
+            url: "https://example.com/b".to_string(),
+            source: "Source B".to_string(),
+            category: "AI".to_string(),
+            published: chrono::Utc::now(),
+            summary: "Summary B".to_string(),
+            ai_summary: None,
+            relevance: Some(8.0),
+            topic_tag: Some("ai".to_string()),
+        };
+
+
+        let stats = BriefStats {
+            feeds_fetched: 2,
+            total_articles: 10,
+            articles_kept: 2,
+        };
+
+        storage.save(date, 1, "Brief 1", "Executive summary...", &[a1.clone(), a2.clone()], &stats, "model").unwrap();
+
+        let mut app = FeedbriefApp {
+            runtime: Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap()),
+            storage,
+            view: View::Idle,
+            personas,
+            selected_persona_idx: 0,
+            editing_persona: Persona::default(),
+            editing_persona_idx: None,
+            editing_feeds_text: String::new(),
+            delete_confirm_target: None,
+            delete_brief_confirm_target: None,
+            persona_export_path: String::new(),
+            persona_import_path: String::new(),
+            persona_message: String::new(),
+            persona_message_is_error: false,
+            llm_config: LlmConfig::default(),
+            llm_settings_open: false,
+            hours: 24,
+            top_n: 20,
+            progress_rx: None,
+            progress_log: Arc::new(Mutex::new(Vec::new())),
+            current_stage: String::new(),
+            current_message: String::new(),
+            current_percent: 0,
+            current_brief: None,
+            topic_filter: "tech".to_string(),
+            llm_ok: false,
+            last_llm_check: std::time::Instant::now(),
+            llm_check_rx: None,
+            available_dates: vec![date],
+            publish_endpoint: String::new(),
+            publish_token: String::new(),
+            publish_settings_open: false,
+            publish_in_progress: false,
+            publish_result_msg: None,
+            publish_rx: None,
+        };
+
+        app.navigate(date);
+        assert_eq!(app.current_brief.as_ref().unwrap().articles.len(), 2);
+
+        // Remove item A by URL
+        app.remove_article("https://example.com/a");
+
+        let cur = app.current_brief.as_ref().unwrap();
+        assert_eq!(cur.articles.len(), 1);
+        assert_eq!(cur.articles[0].url, "https://example.com/b");
+        assert_eq!(cur.stats.articles_kept, 1);
+
+        // Since topic filter was "tech" and item A (tech) was removed, topic_filter auto-resets to "all"
+        assert_eq!(app.topic_filter, "all");
+
+        // Verify payload built for publish now excludes item A
+        let payload = crate::publish::build_publish_payload(cur.date, &cur.headline, &cur.brief, &cur.articles);
+        assert_eq!(payload.sources.len(), 1);
+        assert_eq!(payload.sources[0].url, "https://example.com/b");
+    }
 }
+
 
 

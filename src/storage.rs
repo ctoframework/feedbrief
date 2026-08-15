@@ -471,6 +471,48 @@ impl Storage {
         }
     }
 
+    pub fn remove_article_by_url(&self, date: NaiveDate, persona_id: i64, url: &str) -> Result<bool> {
+        if let Some(mut brief) = self.load(date, persona_id)? {
+            let orig_len = brief.articles.len();
+            brief.articles.retain(|a| a.url != url);
+            if brief.articles.len() < orig_len {
+                brief.stats.articles_kept = brief.articles.len();
+                self.save(
+                    date,
+                    persona_id,
+                    &brief.headline,
+                    &brief.brief,
+                    &brief.articles,
+                    &brief.stats,
+                    &brief.model,
+                )?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn remove_article_by_index(&self, date: NaiveDate, persona_id: i64, index: usize) -> Result<bool> {
+        if let Some(mut brief) = self.load(date, persona_id)? {
+            if index < brief.articles.len() {
+                brief.articles.remove(index);
+                brief.stats.articles_kept = brief.articles.len();
+                self.save(
+                    date,
+                    persona_id,
+                    &brief.headline,
+                    &brief.brief,
+                    &brief.articles,
+                    &brief.stats,
+                    &brief.model,
+                )?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+
     /// All dates that have a brief for a given persona, sorted ascending.
     pub fn all_dates(&self, persona_id: i64) -> Result<Vec<NaiveDate>> {
         let mut stmt = self
@@ -727,6 +769,84 @@ mod tests {
         assert_eq!(summaries_after.len(), 1);
         assert_eq!(summaries_after[0].date, d1);
     }
+
+    #[test]
+    fn test_remove_article_from_storage() {
+        let storage = in_memory_storage();
+        storage.conn.execute_batch(r#"
+            CREATE TABLE IF NOT EXISTS briefs (
+                date         TEXT NOT NULL,
+                persona_id   INTEGER NOT NULL DEFAULT 1,
+                headline     TEXT NOT NULL DEFAULT '',
+                brief_text   TEXT NOT NULL,
+                articles_json TEXT NOT NULL,
+                feeds_fetched INTEGER NOT NULL,
+                total_articles INTEGER NOT NULL,
+                articles_kept INTEGER NOT NULL,
+                model        TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                PRIMARY KEY (date, persona_id),
+                FOREIGN KEY (persona_id) REFERENCES personas(id)
+            );
+        "#).unwrap();
+
+        let date = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+        let a1 = Article {
+            id: "1".to_string(),
+            title: "Article 1".to_string(),
+            url: "https://example.com/1".to_string(),
+            source: "Source 1".to_string(),
+            category: "Tech".to_string(),
+            published: chrono::Utc::now(),
+            summary: "Summary 1".to_string(),
+            ai_summary: None,
+            relevance: Some(9.0),
+            topic_tag: Some("tech".to_string()),
+        };
+        let a2 = Article {
+            id: "2".to_string(),
+            title: "Article 2".to_string(),
+            url: "https://example.com/2".to_string(),
+            source: "Source 2".to_string(),
+            category: "AI".to_string(),
+            published: chrono::Utc::now(),
+            summary: "Summary 2".to_string(),
+            ai_summary: None,
+            relevance: Some(8.0),
+            topic_tag: Some("ai".to_string()),
+        };
+
+
+        let stats = BriefStats {
+            feeds_fetched: 2,
+            total_articles: 10,
+            articles_kept: 2,
+        };
+
+        storage.save(date, 1, "Test Headline", "Brief text", &[a1.clone(), a2.clone()], &stats, "model").unwrap();
+
+        let loaded = storage.load(date, 1).unwrap().unwrap();
+        assert_eq!(loaded.articles.len(), 2);
+        assert_eq!(loaded.stats.articles_kept, 2);
+
+        // Remove by URL
+        let removed = storage.remove_article_by_url(date, 1, "https://example.com/1").unwrap();
+        assert!(removed);
+
+        let loaded_after = storage.load(date, 1).unwrap().unwrap();
+        assert_eq!(loaded_after.articles.len(), 1);
+        assert_eq!(loaded_after.articles[0].url, "https://example.com/2");
+        assert_eq!(loaded_after.stats.articles_kept, 1);
+
+        // Remove by index
+        let removed_idx = storage.remove_article_by_index(date, 1, 0).unwrap();
+        assert!(removed_idx);
+
+        let loaded_final = storage.load(date, 1).unwrap().unwrap();
+        assert_eq!(loaded_final.articles.len(), 0);
+        assert_eq!(loaded_final.stats.articles_kept, 0);
+    }
 }
+
 
 

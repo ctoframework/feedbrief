@@ -58,7 +58,7 @@ fn parse_args(args: &[String]) -> Result<(String, String, Option<String>), anyho
 
     let command = match cmd {
         Some(c) => c,
-        None => anyhow::bail!("No command specified. Choose fetch, publish, or view."),
+        None => anyhow::bail!("No command specified. Choose fetch, publish, view, or remove-article."),
     };
 
     Ok((persona, command, sub_arg))
@@ -205,10 +205,35 @@ fn run_cli(args: &[String]) -> anyhow::Result<()> {
             }
             println!("================================================================================");
         }
+        "remove-article" | "remove" => {
+            let target = match sub_arg {
+                Some(ref s) => s.as_str(),
+                None => anyhow::bail!("Missing article index (1-based) or URL to remove. Usage: feedbrief [-p persona] remove-article <index|url>"),
+            };
+
+            let today = chrono::Local::now().date_naive();
+            let persona_id = persona.id.unwrap_or(1);
+
+            let removed = if let Ok(idx_1based) = target.parse::<usize>() {
+                if idx_1based == 0 {
+                    anyhow::bail!("Article index must be 1-based (1, 2, 3...)");
+                }
+                storage.remove_article_by_index(today, persona_id, idx_1based - 1)?
+            } else {
+                storage.remove_article_by_url(today, persona_id, target)?
+            };
+
+            if removed {
+                println!("Successfully removed article from brief for persona \"{}\" on date {}", persona.name, today);
+            } else {
+                anyhow::bail!("Article '{}' not found in brief for persona \"{}\" on date {}", target, persona.name, today);
+            }
+        }
         other => {
-            anyhow::bail!("Unknown command '{}'. Choose fetch, publish, or view.", other);
+            anyhow::bail!("Unknown command '{}'. Choose fetch, publish, view, or remove-article.", other);
         }
     }
+
 
     Ok(())
 }
