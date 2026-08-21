@@ -9,8 +9,8 @@ use crate::fetcher::Article;
 use crate::llm::{LlmConfig, ProviderType, check_llm_provider};
 use crate::pipeline::{PipelineConfig, run_pipeline};
 use crate::progress::{BriefStats, ProgressEvent};
-use crate::storage::{Storage, StoredBrief};
 use crate::publish::{build_publish_payload, do_publish_http};
+use crate::storage::{Storage, StoredBrief};
 
 const BG: Color32 = Color32::from_rgb(14, 13, 10);
 const BG_RAISED: Color32 = Color32::from_rgb(22, 20, 15);
@@ -341,20 +341,20 @@ impl FeedbriefApp {
     }
 }
 
-
 impl eframe::App for FeedbriefApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_progress(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.poll_progress(&ctx);
         self.poll_llm();
         self.poll_publish();
 
         egui::CentralPanel::default()
             .frame(
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(BG)
                     .inner_margin(egui::Margin::ZERO),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 self.draw_masthead(ui);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -368,13 +368,13 @@ impl eframe::App for FeedbriefApp {
             });
 
         if self.delete_confirm_target.is_some() {
-            self.draw_delete_confirm_modal(ctx);
+            self.draw_delete_confirm_modal(&ctx);
         }
         if self.delete_brief_confirm_target.is_some() {
-            self.draw_delete_brief_confirm_modal(ctx);
+            self.draw_delete_brief_confirm_modal(&ctx);
         }
         if self.llm_settings_open {
-            self.draw_llm_settings(ctx);
+            self.draw_llm_settings(&ctx);
         }
     }
 }
@@ -474,13 +474,13 @@ impl FeedbriefApp {
     }
 
     fn draw_masthead(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(BG)
             .inner_margin(egui::Margin {
-                left: 36.0,
-                right: 36.0,
-                top: 22.0,
-                bottom: 16.0,
+                left: 36,
+                right: 36,
+                top: 22,
+                bottom: 16,
             })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -552,7 +552,7 @@ impl FeedbriefApp {
                                 ui.separator();
                                 if ui.button("⚙ Personas Config").clicked() {
                                     self.view = View::PersonasConfig(PersonasSubView::List);
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             });
                     });
@@ -612,15 +612,22 @@ impl FeedbriefApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let dot_color = if self.llm_ok { GREEN } else { ACCENT };
                         let status_text = if self.llm_ok {
-                            format!("{} · {} READY ⚙", self.llm_config.provider_label(), self.llm_config.active_model().to_uppercase())
+                            format!(
+                                "{} · {} READY ⚙",
+                                self.llm_config.provider_label(),
+                                self.llm_config.active_model().to_uppercase()
+                            )
                         } else {
                             format!("{} OFFLINE / CONFIG ⚙", self.llm_config.provider_label())
                         };
-                        if ui.button(
-                            RichText::new(status_text)
-                                .font(FontId::new(10.0, FontFamily::Monospace))
-                                .color(if self.llm_ok { INK_DIM } else { ACCENT }),
-                        ).clicked() {
+                        if ui
+                            .button(
+                                RichText::new(status_text)
+                                    .font(FontId::new(10.0, FontFamily::Monospace))
+                                    .color(if self.llm_ok { INK_DIM } else { ACCENT }),
+                            )
+                            .clicked()
+                        {
                             self.llm_settings_open = true;
                         }
                         ui.add_space(6.0);
@@ -687,8 +694,10 @@ impl FeedbriefApp {
                 self.editing_persona.id = Some(saved_id);
                 self.reload_personas(Some(saved_id));
                 self.persona_message_is_error = false;
-                self.persona_message =
-                    format!("Persona '{}' saved successfully.", self.editing_persona.name);
+                self.persona_message = format!(
+                    "Persona '{}' saved successfully.",
+                    self.editing_persona.name
+                );
                 self.view = View::PersonasConfig(PersonasSubView::List);
             }
             Err(err) => {
@@ -868,10 +877,10 @@ impl FeedbriefApp {
                     } else {
                         GREEN
                     };
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(BG_RAISED)
                         .stroke(Stroke::new(1.0, color))
-                        .inner_margin(egui::Margin::same(10.0))
+                        .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
@@ -885,13 +894,13 @@ impl FeedbriefApp {
                 }
 
                 // Table Header
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(BG_RAISED)
                     .inner_margin(egui::Margin {
-                        left: 16.0,
-                        right: 16.0,
-                        top: 8.0,
-                        bottom: 8.0,
+                        left: 16,
+                        right: 16,
+                        top: 8,
+                        bottom: 8,
                     })
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -963,14 +972,14 @@ impl FeedbriefApp {
                     let is_selected = self.selected_persona_idx == i;
                     let is_default = persona.id == Some(1);
 
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(if is_selected { BG_PAPER } else { BG_RAISED })
                         .stroke(Stroke::new(1.0, if is_selected { GOLD } else { RULE }))
                         .inner_margin(egui::Margin {
-                            left: 16.0,
-                            right: 16.0,
-                            top: 12.0,
-                            bottom: 12.0,
+                            left: 16,
+                            right: 16,
+                            top: 12,
+                            bottom: 12,
                         })
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -1227,10 +1236,10 @@ impl FeedbriefApp {
                 }
 
                 // Form Container
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(BG_RAISED)
                     .stroke(Stroke::new(1.0, RULE))
-                    .inner_margin(egui::Margin::same(20.0))
+                    .inner_margin(egui::Margin::same(20))
                     .show(ui, |ui| {
                         ui.vertical(|ui| {
                             // PERSONA NAME
@@ -1778,13 +1787,16 @@ impl FeedbriefApp {
 
     fn draw_history_grid(&mut self, ui: &mut egui::Ui) {
         let persona_id = self.selected_persona_id();
-        let summaries = self.storage.list_brief_summaries(persona_id).unwrap_or_default();
+        let summaries = self
+            .storage
+            .list_brief_summaries(persona_id)
+            .unwrap_or_default();
 
         if summaries.is_empty() {
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(BG_RAISED)
                 .stroke(Stroke::new(1.0, RULE))
-                .inner_margin(egui::Margin::same(24.0))
+                .inner_margin(egui::Margin::same(24))
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(
@@ -1797,10 +1809,10 @@ impl FeedbriefApp {
             return;
         }
 
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(BG_RAISED)
             .stroke(Stroke::new(1.0, RULE))
-            .inner_margin(egui::Margin::same(16.0))
+            .inner_margin(egui::Margin::same(16))
             .show(ui, |ui| {
                 // Header Bar
                 ui.horizontal(|ui| {
@@ -1844,14 +1856,14 @@ impl FeedbriefApp {
                     }
                     let date_str = item.date.format("%b %d, %Y").to_string();
 
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(BG_PAPER)
                         .stroke(Stroke::new(1.0, RULE))
                         .inner_margin(egui::Margin {
-                            left: 12.0,
-                            right: 12.0,
-                            top: 10.0,
-                            bottom: 10.0,
+                            left: 12,
+                            right: 12,
+                            top: 10,
+                            bottom: 10,
                         })
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -1876,7 +1888,10 @@ impl FeedbriefApp {
                                     |ui| {
                                         ui.label(
                                             RichText::new(&item.headline)
-                                                .font(FontId::new(14.0, FontFamily::Name("serif-bold".into())))
+                                                .font(FontId::new(
+                                                    14.0,
+                                                    FontFamily::Name("serif-bold".into()),
+                                                ))
                                                 .color(INK),
                                         );
                                     },
@@ -1888,47 +1903,59 @@ impl FeedbriefApp {
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
                                         ui.label(
-                                            RichText::new(format!("{} articles", item.articles_kept))
-                                                .font(FontId::new(12.0, FontFamily::Monospace))
-                                                .color(INK_FAINT),
+                                            RichText::new(format!(
+                                                "{} articles",
+                                                item.articles_kept
+                                            ))
+                                            .font(FontId::new(12.0, FontFamily::Monospace))
+                                            .color(INK_FAINT),
                                         );
                                     },
                                 );
 
                                 // Actions Column
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui
-                                        .add(
-                                            egui::Button::new(
-                                                RichText::new("🗑 Delete")
-                                                    .font(FontId::new(11.0, FontFamily::Monospace))
-                                                    .color(ACCENT),
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("🗑 Delete")
+                                                        .font(FontId::new(
+                                                            11.0,
+                                                            FontFamily::Monospace,
+                                                        ))
+                                                        .color(ACCENT),
+                                                )
+                                                .fill(BG_RAISED)
+                                                .stroke(Stroke::new(1.0, RULE)),
                                             )
-                                            .fill(BG_RAISED)
-                                            .stroke(Stroke::new(1.0, RULE)),
-                                        )
-                                        .clicked()
-                                    {
-                                        delete_target = Some(item.date);
-                                    }
+                                            .clicked()
+                                        {
+                                            delete_target = Some(item.date);
+                                        }
 
-                                    ui.add_space(8.0);
+                                        ui.add_space(8.0);
 
-                                    if ui
-                                        .add(
-                                            egui::Button::new(
-                                                RichText::new("👁 View")
-                                                    .font(FontId::new(11.0, FontFamily::Monospace))
-                                                    .color(INK),
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("👁 View")
+                                                        .font(FontId::new(
+                                                            11.0,
+                                                            FontFamily::Monospace,
+                                                        ))
+                                                        .color(INK),
+                                                )
+                                                .fill(BG_RAISED)
+                                                .stroke(Stroke::new(1.0, RULE)),
                                             )
-                                            .fill(BG_RAISED)
-                                            .stroke(Stroke::new(1.0, RULE)),
-                                        )
-                                        .clicked()
-                                    {
-                                        navigate_target = Some(item.date);
-                                    }
-                                });
+                                            .clicked()
+                                        {
+                                            navigate_target = Some(item.date);
+                                        }
+                                    },
+                                );
                             });
                         });
                 }
@@ -2148,7 +2175,8 @@ impl FeedbriefApp {
     }
 
     fn start_publish(&mut self, brief: &DisplayedBrief) {
-        let payload = build_publish_payload(brief.date, &brief.headline, &brief.brief, &brief.articles);
+        let payload =
+            build_publish_payload(brief.date, &brief.headline, &brief.brief, &brief.articles);
 
         let endpoint = self.publish_endpoint.clone();
         let token = self.publish_token.clone();
@@ -2164,9 +2192,9 @@ impl FeedbriefApp {
     }
 
     fn draw_publish_bar(&mut self, ui: &mut egui::Ui, brief: &DisplayedBrief) {
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(BG_RAISED)
-            .inner_margin(egui::Margin::same(16.0))
+            .inner_margin(egui::Margin::same(16))
             .stroke(Stroke::new(1.0, RULE))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -2203,7 +2231,10 @@ impl FeedbriefApp {
                                     .font(FontId::new(9.0, FontFamily::Monospace))
                                     .color(INK_FAINT),
                             );
-                            if ui.text_edit_singleline(&mut self.publish_endpoint).changed() {
+                            if ui
+                                .text_edit_singleline(&mut self.publish_endpoint)
+                                .changed()
+                            {
                                 config_changed = true;
                             }
                         });
@@ -2441,10 +2472,10 @@ impl FeedbriefApp {
 
     fn draw_articles(&mut self, ui: &mut egui::Ui, articles: &[Article]) -> Option<String> {
         if articles.is_empty() {
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(BG_RAISED)
                 .stroke(Stroke::new(1.0, RULE))
-                .inner_margin(egui::Margin::same(24.0))
+                .inner_margin(egui::Margin::same(24))
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(
@@ -2464,10 +2495,10 @@ impl FeedbriefApp {
             .collect();
 
         if filtered.is_empty() {
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(BG_RAISED)
                 .stroke(Stroke::new(1.0, RULE))
-                .inner_margin(egui::Margin::same(24.0))
+                .inner_margin(egui::Margin::same(24))
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(
@@ -2617,20 +2648,20 @@ fn history_pill(ui: &mut egui::Ui, text: &str) -> egui::Response {
 
 fn draw_article_card(ui: &mut egui::Ui, article: &Article) -> bool {
     let mut remove_clicked = false;
-    egui::Frame::none()
+    egui::Frame::new()
         .fill(BG_PAPER)
-        .inner_margin(egui::Margin::same(20.0))
+        .inner_margin(egui::Margin::same(20))
         .stroke(Stroke::new(1.0, RULE))
         .show(ui, |ui| {
             if let Some(topic) = &article.topic_tag {
                 ui.horizontal(|ui| {
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(Color32::from_rgba_premultiplied(255, 87, 34, 30))
                         .inner_margin(egui::Margin {
-                            left: 8.0,
-                            right: 8.0,
-                            top: 3.0,
-                            bottom: 3.0,
+                            left: 8,
+                            right: 8,
+                            top: 3,
+                            bottom: 3,
                         })
                         .show(ui, |ui| {
                             ui.label(
@@ -2721,27 +2752,26 @@ fn draw_article_card(ui: &mut egui::Ui, article: &Article) -> bool {
     remove_clicked
 }
 
-
 fn configure_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-    style.visuals.panel_fill = BG;
-    style.visuals.window_fill = BG;
-    style.visuals.extreme_bg_color = BG;
-    style.visuals.faint_bg_color = BG_RAISED;
-    style.visuals.override_text_color = Some(INK);
-    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, RULE);
-    style.visuals.widgets.inactive.bg_fill = BG_RAISED;
-    style.visuals.widgets.inactive.weak_bg_fill = BG_RAISED;
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, RULE);
-    style.visuals.widgets.hovered.bg_fill = BG_PAPER;
-    style.visuals.widgets.hovered.weak_bg_fill = BG_PAPER;
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, INK_DIM);
-    style.visuals.widgets.active.bg_fill = ACCENT;
-    style.visuals.widgets.active.weak_bg_fill = ACCENT;
-    style.visuals.selection.bg_fill = ACCENT;
-    style.visuals.selection.stroke = Stroke::new(1.0, ACCENT);
-    style.spacing.item_spacing = Vec2::new(4.0, 6.0);
-    ctx.set_style(style);
+    ctx.all_styles_mut(|style| {
+        style.visuals.panel_fill = BG;
+        style.visuals.window_fill = BG;
+        style.visuals.extreme_bg_color = BG;
+        style.visuals.faint_bg_color = BG_RAISED;
+        style.visuals.override_text_color = Some(INK);
+        style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, RULE);
+        style.visuals.widgets.inactive.bg_fill = BG_RAISED;
+        style.visuals.widgets.inactive.weak_bg_fill = BG_RAISED;
+        style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, RULE);
+        style.visuals.widgets.hovered.bg_fill = BG_PAPER;
+        style.visuals.widgets.hovered.weak_bg_fill = BG_PAPER;
+        style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, INK_DIM);
+        style.visuals.widgets.active.bg_fill = ACCENT;
+        style.visuals.widgets.active.weak_bg_fill = ACCENT;
+        style.visuals.selection.bg_fill = ACCENT;
+        style.visuals.selection.stroke = Stroke::new(1.0, ACCENT);
+        style.spacing.item_spacing = Vec2::new(4.0, 6.0);
+    });
 }
 
 fn configure_fonts(ctx: &egui::Context) {
@@ -2753,7 +2783,7 @@ fn configure_fonts(ctx: &egui::Context) {
                 Ok(bytes) => {
                     fonts
                         .font_data
-                        .insert(name.to_string(), egui::FontData::from_owned(bytes));
+                        .insert(name.to_string(), egui::FontData::from_owned(bytes).into());
                     true
                 }
                 Err(_) => false,
@@ -2841,9 +2871,15 @@ mod tests {
     #[test]
     fn test_personas_subview_transitions() {
         let storage = Storage::open_in_memory().expect("open memory storage");
-        let personas = storage.list_personas().unwrap_or_else(|_| vec![Persona::default()]);
+        let personas = storage
+            .list_personas()
+            .unwrap_or_else(|_| vec![Persona::default()]);
         let mut app = FeedbriefApp {
-            runtime: Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap()),
+            runtime: Arc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap(),
+            ),
             storage,
             view: View::Idle,
             personas: personas.clone(),
@@ -2885,12 +2921,18 @@ mod tests {
 
         // Start add persona -> switches to Form view with None index
         app.start_add_persona();
-        assert_eq!(app.view, View::PersonasConfig(PersonasSubView::Form { index: None }));
+        assert_eq!(
+            app.view,
+            View::PersonasConfig(PersonasSubView::Form { index: None })
+        );
         assert_eq!(app.editing_persona.name, "New Persona");
 
         // Start edit persona -> switches to Form view with Some(0) index
         app.start_edit_persona(0);
-        assert_eq!(app.view, View::PersonasConfig(PersonasSubView::Form { index: Some(0) }));
+        assert_eq!(
+            app.view,
+            View::PersonasConfig(PersonasSubView::Form { index: Some(0) })
+        );
         assert_eq!(app.editing_persona.name, personas[0].name);
 
         // Edit feeds and save
@@ -2905,7 +2947,9 @@ mod tests {
     #[test]
     fn test_history_view_navigation() {
         let storage = Storage::open_in_memory().expect("open memory storage");
-        let personas = storage.list_personas().unwrap_or_else(|_| vec![Persona::default()]);
+        let personas = storage
+            .list_personas()
+            .unwrap_or_else(|_| vec![Persona::default()]);
 
         // Save a brief into storage
         let date = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
@@ -2914,10 +2958,24 @@ mod tests {
             total_articles: 25,
             articles_kept: 5,
         };
-        storage.save(date, 1, "Tech Breakthroughs", "Brief content...", &[], &stats, "ollama:llama3").unwrap();
+        storage
+            .save(
+                date,
+                1,
+                "Tech Breakthroughs",
+                "Brief content...",
+                &[],
+                &stats,
+                "ollama:llama3",
+            )
+            .unwrap();
 
         let mut app = FeedbriefApp {
-            runtime: Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap()),
+            runtime: Arc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap(),
+            ),
             storage,
             view: View::Idle,
             personas,
@@ -2968,7 +3026,9 @@ mod tests {
     #[test]
     fn test_app_remove_article() {
         let storage = Storage::open_in_memory().expect("open memory storage");
-        let personas = storage.list_personas().unwrap_or_else(|_| vec![Persona::default()]);
+        let personas = storage
+            .list_personas()
+            .unwrap_or_else(|_| vec![Persona::default()]);
         let date = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
 
         let a1 = Article {
@@ -2996,17 +3056,30 @@ mod tests {
             topic_tag: Some("ai".to_string()),
         };
 
-
         let stats = BriefStats {
             feeds_fetched: 2,
             total_articles: 10,
             articles_kept: 2,
         };
 
-        storage.save(date, 1, "Brief 1", "Executive summary...", &[a1.clone(), a2.clone()], &stats, "model").unwrap();
+        storage
+            .save(
+                date,
+                1,
+                "Brief 1",
+                "Executive summary...",
+                &[a1.clone(), a2.clone()],
+                &stats,
+                "model",
+            )
+            .unwrap();
 
         let mut app = FeedbriefApp {
-            runtime: Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap()),
+            runtime: Arc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap(),
+            ),
             storage,
             view: View::Idle,
             personas,
@@ -3058,11 +3131,13 @@ mod tests {
         assert_eq!(app.topic_filter, "all");
 
         // Verify payload built for publish now excludes item A
-        let payload = crate::publish::build_publish_payload(cur.date, &cur.headline, &cur.brief, &cur.articles);
+        let payload = crate::publish::build_publish_payload(
+            cur.date,
+            &cur.headline,
+            &cur.brief,
+            &cur.articles,
+        );
         assert_eq!(payload.sources.len(), 1);
         assert_eq!(payload.sources[0].url, "https://example.com/b");
     }
 }
-
-
-
