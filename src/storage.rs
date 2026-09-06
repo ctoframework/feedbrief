@@ -802,6 +802,7 @@ mod tests {
             ai_summary: None,
             relevance: Some(9.0),
             topic_tag: Some("tech".to_string()),
+            is_favourite: None,
         };
         let a2 = Article {
             id: "2".to_string(),
@@ -814,6 +815,7 @@ mod tests {
             ai_summary: None,
             relevance: Some(8.0),
             topic_tag: Some("ai".to_string()),
+            is_favourite: None,
         };
 
 

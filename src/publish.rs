@@ -16,6 +16,8 @@ pub struct PublishSource {
     pub url: String,
     pub description: String,
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favourite: Option<bool>,
 }
 
 pub fn build_publish_payload(
@@ -43,6 +45,7 @@ pub fn build_publish_payload(
             url: a.url.clone(),
             description: a.summary.clone(),
             summary: a.ai_summary.clone(),
+            favourite: a.is_favourite,
         })
         .collect();
 
@@ -113,6 +116,7 @@ mod tests {
                     url: "https://arxiv.org".to_string(),
                     description: "Open access research on cluster scaling.".to_string(),
                     summary: Some("This paper discusses the latest advancements in AI infrastructure, focusing on GPU cluster interconnects and multi-agent governance frameworks.".to_string()),
+                    favourite: Some(true),
                 }
             ],
         };
@@ -130,5 +134,6 @@ mod tests {
         );
         assert_eq!(val["tags"][0], "ai");
         assert_eq!(val["sources"][0]["title"], "ArXiv AI Infrastructure Paper");
+        assert_eq!(val["sources"][0]["favourite"], true);
     }
 }

@@ -22,6 +22,8 @@ pub struct Article {
     pub relevance: Option<f32>,
     pub topic_tag: Option<String>,
     pub ai_summary: Option<String>,
+    #[serde(default)]
+    pub is_favourite: Option<bool>,
 }
 
 fn hash_id(url: &str) -> String {
@@ -108,6 +110,7 @@ async fn fetch_one(
             relevance: None,
             topic_tag: None,
             ai_summary: None,
+            is_favourite: None,
         });
     }
     Ok(articles)

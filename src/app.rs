@@ -309,6 +309,27 @@ impl FeedbriefApp {
         }
     }
 
+    pub fn toggle_favourite(&mut self, url: &str) {
+        if let Some(brief) = &mut self.current_brief {
+            if let Some(article) = brief.articles.iter_mut().find(|a| a.url == url) {
+                let current_fav = article.is_favourite.unwrap_or(false);
+                article.is_favourite = Some(!current_fav);
+                let persona_id = self.personas[self.selected_persona_idx].id.unwrap_or(1);
+                if let Err(e) = self.storage.save(
+                    brief.date,
+                    persona_id,
+                    &brief.headline,
+                    &brief.brief,
+                    &brief.articles,
+                    &brief.stats,
+                    &brief.model,
+                ) {
+                    eprintln!("Failed to save brief after toggling favourite: {}", e);
+                }
+            }
+        }
+    }
+
     pub fn remove_article(&mut self, url: &str) {
         if let Some(brief) = &mut self.current_brief {
             let orig_len = brief.articles.len();
@@ -2365,8 +2386,12 @@ impl FeedbriefApp {
 
                 self.draw_filter_bar(ui, &brief.articles);
                 ui.add_space(24.0);
-                if let Some(url_to_remove) = self.draw_articles(ui, &brief.articles) {
+                let (to_remove, to_toggle_fav) = self.draw_articles(ui, &brief.articles);
+                if let Some(url_to_remove) = to_remove {
                     self.remove_article(&url_to_remove);
+                }
+                if let Some(url_to_toggle) = to_toggle_fav {
+                    self.toggle_favourite(&url_to_toggle);
                 }
 
                 ui.add_space(40.0);
@@ -2462,6 +2487,9 @@ impl FeedbriefApp {
             if topic_pill(ui, "all", self.topic_filter == "all").clicked() {
                 self.topic_filter = "all".to_string();
             }
+            if topic_pill(ui, "★ favourites", self.topic_filter == "favourites").clicked() {
+                self.topic_filter = "favourites".to_string();
+            }
             for t in &topics {
                 if topic_pill(ui, t, self.topic_filter == *t).clicked() {
                     self.topic_filter = t.clone();
@@ -2470,7 +2498,7 @@ impl FeedbriefApp {
         });
     }
 
-    fn draw_articles(&mut self, ui: &mut egui::Ui, articles: &[Article]) -> Option<String> {
+    fn draw_articles(&mut self, ui: &mut egui::Ui, articles: &[Article]) -> (Option<String>, Option<String>) {
         if articles.is_empty() {
             egui::Frame::new()
                 .fill(BG_RAISED)
@@ -2485,13 +2513,21 @@ impl FeedbriefApp {
                         );
                     });
                 });
-            return None;
+            return (None, None);
         }
 
         let filter = self.topic_filter.clone();
         let filtered: Vec<&Article> = articles
             .iter()
-            .filter(|a| filter == "all" || a.topic_tag.as_deref() == Some(&filter))
+            .filter(|a| {
+                if filter == "all" {
+                    true
+                } else if filter == "favourites" {
+                    a.is_favourite.unwrap_or(false)
+                } else {
+                    a.topic_tag.as_deref() == Some(&filter)
+                }
+            })
             .collect();
 
         if filtered.is_empty() {
@@ -2501,17 +2537,23 @@ impl FeedbriefApp {
                 .inner_margin(egui::Margin::same(24))
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
+                        let msg = if filter == "favourites" {
+                            "No favourite articles yet. Mark articles with ★ to add them."
+                        } else {
+                            "No articles matching topic filter."
+                        };
                         ui.label(
-                            RichText::new("No articles matching topic filter.")
+                            RichText::new(msg)
                                 .font(FontId::new(14.0, FontFamily::Name("serif-italic".into())))
                                 .color(INK_FAINT),
                         );
                     });
                 });
-            return None;
+            return (None, None);
         }
 
         let mut article_to_remove = None;
+        let mut article_to_toggle_fav = None;
         let col_w = (ui.available_width() - 24.0) / 2.0;
         for chunk in filtered.chunks(2) {
             ui.horizontal_top(|ui| {
@@ -2520,8 +2562,12 @@ impl FeedbriefApp {
                         Vec2::new(col_w, 0.0),
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
-                            if draw_article_card(ui, article) {
+                            let (rem, fav) = draw_article_card(ui, article);
+                            if rem {
                                 article_to_remove = Some(article.url.clone());
+                            }
+                            if fav {
+                                article_to_toggle_fav = Some(article.url.clone());
                             }
                         },
                     );
@@ -2531,7 +2577,7 @@ impl FeedbriefApp {
             ui.add_space(20.0);
         }
 
-        article_to_remove
+        (article_to_remove, article_to_toggle_fav)
     }
 }
 
@@ -2646,8 +2692,10 @@ fn history_pill(ui: &mut egui::Ui, text: &str) -> egui::Response {
     resp
 }
 
-fn draw_article_card(ui: &mut egui::Ui, article: &Article) -> bool {
+fn draw_article_card(ui: &mut egui::Ui, article: &Article) -> (bool, bool) {
     let mut remove_clicked = false;
+    let mut favourite_clicked = false;
+    let is_fav = article.is_favourite.unwrap_or(false);
     egui::Frame::new()
         .fill(BG_PAPER)
         .inner_margin(egui::Margin::same(20))
@@ -2746,10 +2794,32 @@ fn draw_article_card(ui: &mut egui::Ui, article: &Article) -> bool {
                     if remove_btn.clicked() {
                         remove_clicked = true;
                     }
+
+                    ui.add_space(6.0);
+                    let (fav_text, fav_color) = if is_fav {
+                        ("★ Favourite", GOLD)
+                    } else {
+                        ("☆ Favourite", INK_FAINT)
+                    };
+                    let fav_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new(fav_text)
+                                .font(FontId::new(10.0, FontFamily::Monospace))
+                                .color(fav_color),
+                        )
+                        .fill(BG_RAISED)
+                        .stroke(Stroke::new(1.0, RULE)),
+                    );
+                    if fav_btn.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if fav_btn.clicked() {
+                        favourite_clicked = true;
+                    }
                 });
             });
         });
-    remove_clicked
+    (remove_clicked, favourite_clicked)
 }
 
 fn configure_style(ctx: &egui::Context) {
@@ -3042,6 +3112,7 @@ mod tests {
             ai_summary: None,
             relevance: Some(9.0),
             topic_tag: Some("tech".to_string()),
+            is_favourite: None,
         };
         let a2 = Article {
             id: "b".to_string(),
@@ -3054,6 +3125,7 @@ mod tests {
             ai_summary: None,
             relevance: Some(8.0),
             topic_tag: Some("ai".to_string()),
+            is_favourite: None,
         };
 
         let stats = BriefStats {
@@ -3138,6 +3210,118 @@ mod tests {
             &cur.articles,
         );
         assert_eq!(payload.sources.len(), 1);
-        assert_eq!(payload.sources[0].url, "https://example.com/b");
+    }
+
+    #[test]
+    fn test_app_favourite_article() {
+        let storage = Storage::open_in_memory().expect("open memory storage");
+        let personas = storage
+            .list_personas()
+            .unwrap_or_else(|_| vec![Persona::default()]);
+        let date = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+
+        let a1 = Article {
+            id: "a".to_string(),
+            title: "Item A".to_string(),
+            url: "https://example.com/a".to_string(),
+            source: "Source A".to_string(),
+            category: "Tech".to_string(),
+            published: chrono::Utc::now(),
+            summary: "Summary A".to_string(),
+            ai_summary: None,
+            relevance: Some(9.0),
+            topic_tag: Some("tech".to_string()),
+            is_favourite: None,
+        };
+
+        let stats = BriefStats {
+            feeds_fetched: 1,
+            total_articles: 1,
+            articles_kept: 1,
+        };
+
+        storage
+            .save(
+                date,
+                1,
+                "Brief 1",
+                "Executive summary...",
+                &[a1.clone()],
+                &stats,
+                "model",
+            )
+            .unwrap();
+
+        let mut app = FeedbriefApp {
+            runtime: Arc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap(),
+            ),
+            storage,
+            view: View::Idle,
+            personas,
+            selected_persona_idx: 0,
+            editing_persona: Persona::default(),
+            editing_persona_idx: None,
+            editing_feeds_text: String::new(),
+            delete_confirm_target: None,
+            delete_brief_confirm_target: None,
+            persona_export_path: String::new(),
+            persona_import_path: String::new(),
+            persona_message: String::new(),
+            persona_message_is_error: false,
+            llm_config: LlmConfig::default(),
+            llm_settings_open: false,
+            hours: 24,
+            top_n: 20,
+            progress_rx: None,
+            progress_log: Arc::new(Mutex::new(Vec::new())),
+            current_stage: String::new(),
+            current_message: String::new(),
+            current_percent: 0,
+            current_brief: None,
+            topic_filter: "all".to_string(),
+            llm_ok: false,
+            last_llm_check: std::time::Instant::now(),
+            llm_check_rx: None,
+            available_dates: vec![date],
+            publish_endpoint: String::new(),
+            publish_token: String::new(),
+            publish_settings_open: false,
+            publish_in_progress: false,
+            publish_result_msg: None,
+            publish_rx: None,
+        };
+
+        app.navigate(date);
+        assert_eq!(app.current_brief.as_ref().unwrap().articles[0].is_favourite, None);
+
+        // Toggle favourite to true
+        app.toggle_favourite("https://example.com/a");
+        assert_eq!(app.current_brief.as_ref().unwrap().articles[0].is_favourite, Some(true));
+
+        // Verify publish payload includes favourite flag
+        let cur = app.current_brief.as_ref().unwrap();
+        let payload = crate::publish::build_publish_payload(
+            cur.date,
+            &cur.headline,
+            &cur.brief,
+            &cur.articles,
+        );
+        assert_eq!(payload.sources[0].favourite, Some(true));
+
+        // Toggle favourite back to false
+        app.toggle_favourite("https://example.com/a");
+        assert_eq!(app.current_brief.as_ref().unwrap().articles[0].is_favourite, Some(false));
+
+        let cur = app.current_brief.as_ref().unwrap();
+        let payload = crate::publish::build_publish_payload(
+            cur.date,
+            &cur.headline,
+            &cur.brief,
+            &cur.articles,
+        );
+        assert_eq!(payload.sources[0].favourite, Some(false));
     }
 }
