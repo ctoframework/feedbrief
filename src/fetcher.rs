@@ -26,6 +26,13 @@ pub struct Article {
     pub is_favourite: Option<bool>,
 }
 
+#[derive(Debug, Clone)]
+pub struct FeedFetchStatus {
+    pub feed_url: String,
+    pub last_item_published: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
 fn hash_id(url: &str) -> String {
     let mut h = Sha256::new();
     h.update(url.as_bytes());
@@ -60,7 +67,7 @@ async fn fetch_one(
     client: &reqwest::Client,
     source: &FeedSource,
     max_age: Duration,
-) -> Result<Vec<Article>> {
+) -> Result<(Vec<Article>, Option<DateTime<Utc>>)> {
     let resp = client
         .get(&source.url)
         .timeout(StdDuration::from_secs(15))
@@ -72,6 +79,7 @@ async fn fetch_one(
     let feed = parser::parse(&bytes[..])?;
     let cutoff = Utc::now() - max_age;
     let mut articles = Vec::new();
+    let mut last_item_published = None;
 
     for entry in feed.entries {
         let url = entry
@@ -87,6 +95,9 @@ async fn fetch_one(
             .map(|t| t.content)
             .unwrap_or_else(|| "Untitled".to_string());
         let published = entry.published.or(entry.updated).unwrap_or_else(Utc::now);
+        last_item_published = Some(
+            last_item_published.map_or(published, |latest: DateTime<Utc>| latest.max(published)),
+        );
         if published < cutoff {
             continue;
         }
@@ -113,7 +124,7 @@ async fn fetch_one(
             is_favourite: None,
         });
     }
-    Ok(articles)
+    Ok((articles, last_item_published))
 }
 
 /// Fetches all feeds in parallel, emitting progress per-feed as it completes.
@@ -121,7 +132,7 @@ pub async fn fetch_all(
     sources: &[FeedSource],
     hours: i64,
     tx: &UnboundedSender<ProgressEvent>,
-) -> Vec<Article> {
+) -> (Vec<Article>, Vec<FeedFetchStatus>) {
     let client = reqwest::Client::builder()
         .timeout(StdDuration::from_secs(20))
         .build()
@@ -148,13 +159,14 @@ pub async fn fetch_all(
         .collect();
 
     let mut all = Vec::new();
+    let mut statuses = Vec::new();
     let mut completed = 0usize;
 
     while let Some((source, result)) = futs.next().await {
         completed += 1;
         let percent = 2 + (completed * 23 / total) as u8;
         match result {
-            Ok(mut articles) => {
+            Ok((mut articles, last_item_published)) => {
                 let count = articles.len();
                 let _ = tx.send(ProgressEvent::Stage {
                     stage: "FETCH".into(),
@@ -162,13 +174,31 @@ pub async fn fetch_all(
                     percent,
                 });
                 all.append(&mut articles);
+                let status = FeedFetchStatus {
+                    feed_url: source.url.clone(),
+                    last_item_published,
+                    error: None,
+                };
+                let _ = tx.send(ProgressEvent::FeedStatus(status.clone()));
+                statuses.push(status);
             }
             Err(e) => {
+                let error = e.to_string();
                 let _ = tx.send(ProgressEvent::Stage {
                     stage: "FETCH".into(),
-                    message: format!("[{}/{}] {} — failed ({})", completed, total, source.name, e),
+                    message: format!(
+                        "[{}/{}] {} — failed ({})",
+                        completed, total, source.name, error
+                    ),
                     percent,
                 });
+                let status = FeedFetchStatus {
+                    feed_url: source.url.clone(),
+                    last_item_published: None,
+                    error: Some(error),
+                };
+                let _ = tx.send(ProgressEvent::FeedStatus(status.clone()));
+                statuses.push(status);
             }
         }
     }
@@ -176,5 +206,5 @@ pub async fn fetch_all(
     all.sort_by(|a, b| a.url.cmp(&b.url));
     all.dedup_by(|a, b| a.url == b.url);
     all.sort_by(|a, b| b.published.cmp(&a.published));
-    all
+    (all, statuses)
 }

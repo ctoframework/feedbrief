@@ -58,7 +58,9 @@ fn parse_args(args: &[String]) -> Result<(String, String, Option<String>), anyho
 
     let command = match cmd {
         Some(c) => c,
-        None => anyhow::bail!("No command specified. Choose fetch, publish, view, or remove-article."),
+        None => {
+            anyhow::bail!("No command specified. Choose fetch, publish, view, or remove-article.")
+        }
     };
 
     Ok((persona, command, sub_arg))
@@ -102,10 +104,20 @@ fn run_cli(args: &[String]) -> anyhow::Result<()> {
 
                 while let Some(event) = rx.recv().await {
                     match event {
-                        feedbrief::progress::ProgressEvent::Stage { stage, message, percent } => {
+                        feedbrief::progress::ProgressEvent::Stage {
+                            stage,
+                            message,
+                            percent,
+                        } => {
                             println!("[{}] {} ({}%)", stage, message, percent);
                         }
-                        feedbrief::progress::ProgressEvent::Done { headline, brief, articles, stats } => {
+                        feedbrief::progress::ProgressEvent::FeedStatus(_) => {}
+                        feedbrief::progress::ProgressEvent::Done {
+                            headline,
+                            brief,
+                            articles,
+                            stats,
+                        } => {
                             let today = chrono::Local::now().date_naive();
                             let persona_id = persona.id.unwrap_or(1);
                             let llm_config = storage.load_llm_config().unwrap_or_default();
@@ -120,9 +132,15 @@ fn run_cli(args: &[String]) -> anyhow::Result<()> {
                             ) {
                                 eprintln!("Failed to save brief: {}", e);
                             } else {
-                                println!("\nDone! Brief saved to database for persona \"{}\" on date {}", persona.name, today);
+                                println!(
+                                    "\nDone! Brief saved to database for persona \"{}\" on date {}",
+                                    persona.name, today
+                                );
                                 println!("Headline: {}", headline);
-                                println!("Articles kept: {} (out of {} fetched)", stats.articles_kept, stats.total_articles);
+                                println!(
+                                    "Articles kept: {} (out of {} fetched)",
+                                    stats.articles_kept, stats.total_articles
+                                );
                             }
                         }
                         feedbrief::progress::ProgressEvent::Error(err_msg) => {
@@ -172,8 +190,13 @@ fn run_cli(args: &[String]) -> anyhow::Result<()> {
                     if s_clean.starts_with('[') && s_clean.ends_with(']') {
                         s_clean = &s_clean[1..s_clean.len() - 1];
                     }
-                    chrono::NaiveDate::parse_from_str(s_clean, "%Y-%m-%d")
-                        .map_err(|e| anyhow::anyhow!("Invalid date format '{}'. Expected YYYY-MM-DD. Error: {}", s, e))?
+                    chrono::NaiveDate::parse_from_str(s_clean, "%Y-%m-%d").map_err(|e| {
+                        anyhow::anyhow!(
+                            "Invalid date format '{}'. Expected YYYY-MM-DD. Error: {}",
+                            s,
+                            e
+                        )
+                    })?
                 }
                 None => chrono::Local::now().date_naive(),
             };
@@ -183,32 +206,51 @@ fn run_cli(args: &[String]) -> anyhow::Result<()> {
             let brief = match brief_opt {
                 Some(b) => b,
                 None => {
-                    anyhow::bail!("No brief found for persona \"{}\" on date {}.", persona.name, date);
+                    anyhow::bail!(
+                        "No brief found for persona \"{}\" on date {}.",
+                        persona.name,
+                        date
+                    );
                 }
             };
 
-            println!("================================================================================");
+            println!(
+                "================================================================================"
+            );
             println!("DAILY BRIEFING: {} - Persona: {}", date, persona.name);
-            println!("================================================================================");
+            println!(
+                "================================================================================"
+            );
             println!("Headline: {}", brief.headline);
             println!("Model   : {}", brief.model);
-            println!("Stats   : {} kept / {} fetched across {} feeds", brief.stats.articles_kept, brief.stats.total_articles, brief.stats.feeds_fetched);
-            println!("--------------------------------------------------------------------------------");
+            println!(
+                "Stats   : {} kept / {} fetched across {} feeds",
+                brief.stats.articles_kept, brief.stats.total_articles, brief.stats.feeds_fetched
+            );
+            println!(
+                "--------------------------------------------------------------------------------"
+            );
             println!("\nExecutive Briefing:\n");
             println!("{}", brief.brief);
-            println!("\n--------------------------------------------------------------------------------");
+            println!(
+                "\n--------------------------------------------------------------------------------"
+            );
             println!("Key Stories:");
             for (idx, a) in brief.articles.iter().enumerate() {
                 println!("\n[{}] {} ({})", idx + 1, a.title, a.url);
                 let summary = a.ai_summary.as_deref().unwrap_or(&a.summary);
                 println!("    Summary: {}", summary);
             }
-            println!("================================================================================");
+            println!(
+                "================================================================================"
+            );
         }
         "remove-article" | "remove" => {
             let target = match sub_arg {
                 Some(ref s) => s.as_str(),
-                None => anyhow::bail!("Missing article index (1-based) or URL to remove. Usage: feedbrief [-p persona] remove-article <index|url>"),
+                None => anyhow::bail!(
+                    "Missing article index (1-based) or URL to remove. Usage: feedbrief [-p persona] remove-article <index|url>"
+                ),
             };
 
             let today = chrono::Local::now().date_naive();
@@ -224,16 +266,26 @@ fn run_cli(args: &[String]) -> anyhow::Result<()> {
             };
 
             if removed {
-                println!("Successfully removed article from brief for persona \"{}\" on date {}", persona.name, today);
+                println!(
+                    "Successfully removed article from brief for persona \"{}\" on date {}",
+                    persona.name, today
+                );
             } else {
-                anyhow::bail!("Article '{}' not found in brief for persona \"{}\" on date {}", target, persona.name, today);
+                anyhow::bail!(
+                    "Article '{}' not found in brief for persona \"{}\" on date {}",
+                    target,
+                    persona.name,
+                    today
+                );
             }
         }
         other => {
-            anyhow::bail!("Unknown command '{}'. Choose fetch, publish, view, or remove-article.", other);
+            anyhow::bail!(
+                "Unknown command '{}'. Choose fetch, publish, view, or remove-article.",
+                other
+            );
         }
     }
-
 
     Ok(())
 }

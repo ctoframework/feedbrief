@@ -5,6 +5,23 @@ pub struct FeedSource {
     pub name: String,
     pub url: String,
     pub category: String,
+    #[serde(default = "default_active")]
+    pub active: bool,
+}
+
+fn default_active() -> bool {
+    true
+}
+
+impl FeedSource {
+    fn new(name: &str, url: &str, category: &str) -> Self {
+        Self {
+            name: name.into(),
+            url: url.into(),
+            category: category.into(),
+            active: true,
+        }
+    }
 }
 
 fn default_publish_endpoint() -> String {
@@ -42,145 +59,125 @@ impl Default for Persona {
 
 pub fn default_feeds() -> Vec<FeedSource> {
     vec![
-        FeedSource {
-            name: "Hugging Face Blog".into(),
-            url: "https://huggingface.co/blog/feed.xml".into(),
-            category: "AI/ML".into(),
-        },
-        FeedSource {
-            name: "Google DeepMind".into(),
-            url: "https://deepmind.google/blog/rss.xml".into(),
-            category: "AI/ML".into(),
-        },
-        FeedSource {
-            name: "OpenAI Blog".into(),
-            url: "https://openai.com/blog/rss.xml".into(),
-            category: "AI/ML".into(),
-        },
-        FeedSource {
-            name: "Anthropic News".into(),
-            url: "https://www.anthropic.com/news/rss.xml".into(),
-            category: "AI/ML".into(),
-        },
-        FeedSource {
-            name: "BAIR Blog".into(),
-            url: "https://bair.berkeley.edu/blog/feed.xml".into(),
-            category: "AI/ML".into(),
-        },
-        FeedSource {
-            name: "Import AI".into(),
-            url: "https://importai.substack.com/feed".into(),
-            category: "AI/ML".into(),
-        },
-        FeedSource {
-            name: "arXiv cs.AI".into(),
-            url: "http://export.arxiv.org/rss/cs.AI".into(),
-            category: "Research".into(),
-        },
-        FeedSource {
-            name: "arXiv cs.LG".into(),
-            url: "http://export.arxiv.org/rss/cs.LG".into(),
-            category: "Research".into(),
-        },
-        FeedSource {
-            name: "arXiv cs.CL".into(),
-            url: "http://export.arxiv.org/rss/cs.CL".into(),
-            category: "Research".into(),
-        },
-        FeedSource {
-            name: "arXiv cs.CR".into(),
-            url: "http://export.arxiv.org/rss/cs.CR".into(),
-            category: "Research".into(),
-        },
-        FeedSource {
-            name: "arXiv cs.RO".into(),
-            url: "http://export.arxiv.org/rss/cs.RO".into(),
-            category: "Research".into(),
-        },
-        FeedSource {
-            name: "TechCrunch".into(),
-            url: "https://techcrunch.com/feed/".into(),
-            category: "Startups".into(),
-        },
-        FeedSource {
-            name: "Hacker News Front".into(),
-            url: "https://hnrss.org/frontpage".into(),
-            category: "Startups".into(),
-        },
-        FeedSource {
-            name: "Y Combinator Blog".into(),
-            url: "https://www.ycombinator.com/blog/rss".into(),
-            category: "Startups".into(),
-        },
-        FeedSource {
-            name: "Crunchbase News".into(),
-            url: "https://news.crunchbase.com/feed/".into(),
-            category: "Startups".into(),
-        },
-        FeedSource {
-            name: "SemiAnalysis".into(),
-            url: "https://www.semianalysis.com/feed".into(),
-            category: "Hardware".into(),
-        },
-        FeedSource {
-            name: "IEEE Spectrum".into(),
-            url: "https://spectrum.ieee.org/feeds/feed.rss".into(),
-            category: "Hardware".into(),
-        },
-        FeedSource {
-            name: "AnandTech".into(),
-            url: "https://www.anandtech.com/rss/".into(),
-            category: "Hardware".into(),
-        },
-        FeedSource {
-            name: "Krebs on Security".into(),
-            url: "https://krebsonsecurity.com/feed/".into(),
-            category: "Security".into(),
-        },
-        FeedSource {
-            name: "The Hacker News".into(),
-            url: "https://feeds.feedburner.com/TheHackersNews".into(),
-            category: "Security".into(),
-        },
-        FeedSource {
-            name: "Schneier on Security".into(),
-            url: "https://www.schneier.com/feed/atom/".into(),
-            category: "Security".into(),
-        },
-        FeedSource {
-            name: "Ars Technica".into(),
-            url: "https://feeds.arstechnica.com/arstechnica/index".into(),
-            category: "Tech".into(),
-        },
-        FeedSource {
-            name: "The Verge".into(),
-            url: "https://www.theverge.com/rss/index.xml".into(),
-            category: "Tech".into(),
-        },
-        FeedSource {
-            name: "MIT Tech Review".into(),
-            url: "https://www.technologyreview.com/feed/".into(),
-            category: "Tech".into(),
-        },
-        FeedSource {
-            name: "Wired".into(),
-            url: "https://www.wired.com/feed/rss".into(),
-            category: "Tech".into(),
-        },
-        FeedSource {
-            name: "Quanta Magazine".into(),
-            url: "https://www.quantamagazine.org/feed/".into(),
-            category: "Science".into(),
-        },
-        FeedSource {
-            name: "Nature News".into(),
-            url: "https://www.nature.com/nature.rss".into(),
-            category: "Science".into(),
-        },
-        FeedSource {
-            name: "Science News".into(),
-            url: "https://www.sciencenews.org/feed".into(),
-            category: "Science".into(),
-        },
+        FeedSource::new(
+            "Hugging Face Blog",
+            "https://huggingface.co/blog/feed.xml",
+            "AI/ML",
+        ),
+        FeedSource::new(
+            "Google DeepMind",
+            "https://deepmind.google/blog/rss.xml",
+            "AI/ML",
+        ),
+        FeedSource::new("OpenAI Blog", "https://openai.com/blog/rss.xml", "AI/ML"),
+        FeedSource::new(
+            "Anthropic News",
+            "https://www.anthropic.com/news/rss.xml",
+            "AI/ML",
+        ),
+        FeedSource::new(
+            "BAIR Blog",
+            "https://bair.berkeley.edu/blog/feed.xml",
+            "AI/ML",
+        ),
+        FeedSource::new("Import AI", "https://importai.substack.com/feed", "AI/ML"),
+        FeedSource::new(
+            "arXiv cs.AI",
+            "http://export.arxiv.org/rss/cs.AI",
+            "Research",
+        ),
+        FeedSource::new(
+            "arXiv cs.LG",
+            "http://export.arxiv.org/rss/cs.LG",
+            "Research",
+        ),
+        FeedSource::new(
+            "arXiv cs.CL",
+            "http://export.arxiv.org/rss/cs.CL",
+            "Research",
+        ),
+        FeedSource::new(
+            "arXiv cs.CR",
+            "http://export.arxiv.org/rss/cs.CR",
+            "Research",
+        ),
+        FeedSource::new(
+            "arXiv cs.RO",
+            "http://export.arxiv.org/rss/cs.RO",
+            "Research",
+        ),
+        FeedSource::new("TechCrunch", "https://techcrunch.com/feed/", "Startups"),
+        FeedSource::new(
+            "Hacker News Front",
+            "https://hnrss.org/frontpage",
+            "Startups",
+        ),
+        FeedSource::new(
+            "Y Combinator Blog",
+            "https://www.ycombinator.com/blog/rss",
+            "Startups",
+        ),
+        FeedSource::new(
+            "Crunchbase News",
+            "https://news.crunchbase.com/feed/",
+            "Startups",
+        ),
+        FeedSource::new(
+            "SemiAnalysis",
+            "https://www.semianalysis.com/feed",
+            "Hardware",
+        ),
+        FeedSource::new(
+            "IEEE Spectrum",
+            "https://spectrum.ieee.org/feeds/feed.rss",
+            "Hardware",
+        ),
+        FeedSource::new("AnandTech", "https://www.anandtech.com/rss/", "Hardware"),
+        FeedSource::new(
+            "Krebs on Security",
+            "https://krebsonsecurity.com/feed/",
+            "Security",
+        ),
+        FeedSource::new(
+            "The Hacker News",
+            "https://feeds.feedburner.com/TheHackersNews",
+            "Security",
+        ),
+        FeedSource::new(
+            "Schneier on Security",
+            "https://www.schneier.com/feed/atom/",
+            "Security",
+        ),
+        FeedSource::new(
+            "Ars Technica",
+            "https://feeds.arstechnica.com/arstechnica/index",
+            "Tech",
+        ),
+        FeedSource::new(
+            "The Verge",
+            "https://www.theverge.com/rss/index.xml",
+            "Tech",
+        ),
+        FeedSource::new(
+            "MIT Tech Review",
+            "https://www.technologyreview.com/feed/",
+            "Tech",
+        ),
+        FeedSource::new("Wired", "https://www.wired.com/feed/rss", "Tech"),
+        FeedSource::new(
+            "Quanta Magazine",
+            "https://www.quantamagazine.org/feed/",
+            "Science",
+        ),
+        FeedSource::new(
+            "Nature News",
+            "https://www.nature.com/nature.rss",
+            "Science",
+        ),
+        FeedSource::new(
+            "Science News",
+            "https://www.sciencenews.org/feed",
+            "Science",
+        ),
     ]
 }

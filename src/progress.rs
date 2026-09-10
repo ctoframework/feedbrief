@@ -1,4 +1,4 @@
-use crate::fetcher::Article;
+use crate::fetcher::{Article, FeedFetchStatus};
 
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
@@ -7,6 +7,7 @@ pub enum ProgressEvent {
         message: String,
         percent: u8,
     },
+    FeedStatus(FeedFetchStatus),
     Done {
         headline: String,
         brief: String,

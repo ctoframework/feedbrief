@@ -4,5 +4,5 @@ pub mod fetcher;
 pub mod llm;
 pub mod pipeline;
 pub mod progress;
-pub mod storage;
 pub mod publish;
+pub mod storage;

@@ -213,6 +213,7 @@ impl FeedbriefApp {
 
     fn poll_progress(&mut self, ctx: &egui::Context) {
         let mut completed = false;
+        let persona_id = self.selected_persona_id();
         if let Some(rx) = self.progress_rx.as_mut() {
             while let Ok(event) = rx.try_recv() {
                 match event {
@@ -228,6 +229,9 @@ impl FeedbriefApp {
                             .lock()
                             .unwrap()
                             .push(format!("[{}] {}", stage, message));
+                    }
+                    ProgressEvent::FeedStatus(status) => {
+                        let _ = self.storage.record_feed_status(persona_id, &status);
                     }
                     ProgressEvent::Done {
                         headline,
@@ -370,11 +374,7 @@ impl eframe::App for FeedbriefApp {
         self.poll_publish();
 
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(BG)
-                    .inner_margin(egui::Margin::ZERO),
-            )
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::ZERO))
             .show(ui, |ui| {
                 self.draw_masthead(ui);
                 egui::ScrollArea::vertical()
@@ -699,14 +699,24 @@ impl FeedbriefApp {
     }
 
     fn save_editing_persona(&mut self) {
+        let existing_feeds = self.editing_persona.feeds.clone();
         self.editing_persona.feeds = self
             .editing_feeds_text
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| crate::feeds::FeedSource {
-                name: l.split('/').last().unwrap_or("Feed").to_string(),
-                url: l.trim().to_string(),
-                category: "General".to_string(),
+            .map(|l| {
+                let url = l.trim().to_string();
+                let active = existing_feeds
+                    .iter()
+                    .find(|feed| feed.url == url)
+                    .map(|feed| feed.active)
+                    .unwrap_or(true);
+                crate::feeds::FeedSource {
+                    name: l.split('/').last().unwrap_or("Feed").to_string(),
+                    url,
+                    category: "General".to_string(),
+                    active,
+                }
             })
             .collect();
 
@@ -987,11 +997,16 @@ impl FeedbriefApp {
                 let mut edit_target = None;
                 let mut delete_target = None;
                 let mut select_target = None;
+                let mut pause_target: Option<(usize, String)> = None;
 
                 for i in 0..persona_count {
-                    let persona = &self.personas[i];
+                    let persona = self.personas[i].clone();
                     let is_selected = self.selected_persona_idx == i;
                     let is_default = persona.id == Some(1);
+                    let health = self
+                        .storage
+                        .feed_health_for_persona(&persona)
+                        .unwrap_or_default();
 
                     egui::Frame::new()
                         .fill(if is_selected { BG_PAPER } else { BG_RAISED })
@@ -1141,6 +1156,111 @@ impl FeedbriefApp {
                                     },
                                 );
                             });
+                            ui.add_space(8.0);
+                            egui::CollapsingHeader::new(
+                                RichText::new("FEED HEALTH · latest published item / last error")
+                                    .font(FontId::new(10.0, FontFamily::Monospace))
+                                    .color(INK_DIM),
+                            )
+                            .id_salt(("feed_health", persona.id.unwrap_or(i as i64)))
+                            .default_open(is_selected)
+                            .show(ui, |ui| {
+                                if health.is_empty() {
+                                    ui.label(
+                                        RichText::new("No feeds configured.").color(INK_FAINT),
+                                    );
+                                }
+                                egui::Grid::new(("feed_health_table", persona.id))
+                                    .striped(true)
+                                    .min_col_width(90.0)
+                                    .show(ui, |ui| {
+                                        ui.label(overline("FEED"));
+                                        ui.label(overline("LAST ITEM"));
+                                        ui.label(overline("ERROR COUNT"));
+                                        ui.label(overline("LAST ERROR"));
+                                        ui.label(overline("STATUS"));
+                                        ui.end_row();
+                                        for feed in &health {
+                                            let paused = !feed.source.active;
+                                            ui.vertical(|ui| {
+                                                ui.label(
+                                                    RichText::new(&feed.source.name)
+                                                        .font(FontId::new(
+                                                            11.0,
+                                                            FontFamily::Monospace,
+                                                        ))
+                                                        .color(if paused {
+                                                            INK_FAINT
+                                                        } else {
+                                                            INK
+                                                        }),
+                                                );
+                                                ui.label(
+                                                    RichText::new(&feed.source.category)
+                                                        .font(FontId::new(
+                                                            9.0,
+                                                            FontFamily::Monospace,
+                                                        ))
+                                                        .color(INK_FAINT),
+                                                );
+                                            });
+                                            let last_item = feed
+                                                .last_item_published
+                                                .map(|date| {
+                                                    date.with_timezone(&Local)
+                                                        .format("%d %b %Y, %H:%M")
+                                                        .to_string()
+                                                })
+                                                .unwrap_or_else(|| "Not checked".to_string());
+                                            ui.label(
+                                                RichText::new(last_item)
+                                                    .font(FontId::new(10.0, FontFamily::Monospace))
+                                                    .color(INK_DIM),
+                                            );
+                                            ui.label(
+                                                RichText::new(feed.error_count.to_string())
+                                                    .font(FontId::new(11.0, FontFamily::Monospace))
+                                                    .color(if feed.error_count > 0 {
+                                                        ACCENT
+                                                    } else {
+                                                        GREEN
+                                                    }),
+                                            );
+                                            let error_short: String = feed
+                                                .last_error
+                                                .as_deref()
+                                                .unwrap_or("—")
+                                                .chars()
+                                                .take(48)
+                                                .collect();
+                                            ui.label(
+                                                RichText::new(error_short)
+                                                    .font(FontId::new(10.0, FontFamily::Monospace))
+                                                    .color(if feed.last_error.is_some() {
+                                                        ACCENT
+                                                    } else {
+                                                        GREEN
+                                                    }),
+                                            );
+                                            let label =
+                                                if paused { "▶ Resume" } else { "Ⅱ Pause" };
+                                            if ui
+                                                .button(
+                                                    RichText::new(label)
+                                                        .font(FontId::new(
+                                                            10.0,
+                                                            FontFamily::Monospace,
+                                                        ))
+                                                        .color(if paused { GREEN } else { GOLD }),
+                                                )
+                                                .clicked()
+                                            {
+                                                pause_target = Some((i, feed.source.url.clone()));
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
                         });
                     ui.add_space(6.0);
                 }
@@ -1153,6 +1273,20 @@ impl FeedbriefApp {
                 }
                 if let Some(i) = select_target {
                     self.select_persona_by_index(i);
+                }
+                if let Some((i, url)) = pause_target {
+                    if let Some(persona) = self.personas.get_mut(i) {
+                        if let Some(feed) = persona.feeds.iter_mut().find(|feed| feed.url == url) {
+                            feed.active = !feed.active;
+                        }
+                        if let Err(err) = self.storage.save_persona(persona) {
+                            self.persona_message_is_error = true;
+                            self.persona_message = format!("Failed to update feed: {}", err);
+                        } else {
+                            self.persona_message_is_error = false;
+                            self.persona_message = "Feed status updated.".to_string();
+                        }
+                    }
                 }
 
                 ui.add_space(20.0);
@@ -2498,7 +2632,11 @@ impl FeedbriefApp {
         });
     }
 
-    fn draw_articles(&mut self, ui: &mut egui::Ui, articles: &[Article]) -> (Option<String>, Option<String>) {
+    fn draw_articles(
+        &mut self,
+        ui: &mut egui::Ui,
+        articles: &[Article],
+    ) -> (Option<String>, Option<String>) {
         if articles.is_empty() {
             egui::Frame::new()
                 .fill(BG_RAISED)
@@ -3295,11 +3433,17 @@ mod tests {
         };
 
         app.navigate(date);
-        assert_eq!(app.current_brief.as_ref().unwrap().articles[0].is_favourite, None);
+        assert_eq!(
+            app.current_brief.as_ref().unwrap().articles[0].is_favourite,
+            None
+        );
 
         // Toggle favourite to true
         app.toggle_favourite("https://example.com/a");
-        assert_eq!(app.current_brief.as_ref().unwrap().articles[0].is_favourite, Some(true));
+        assert_eq!(
+            app.current_brief.as_ref().unwrap().articles[0].is_favourite,
+            Some(true)
+        );
 
         // Verify publish payload includes favourite flag
         let cur = app.current_brief.as_ref().unwrap();
@@ -3313,7 +3457,10 @@ mod tests {
 
         // Toggle favourite back to false
         app.toggle_favourite("https://example.com/a");
-        assert_eq!(app.current_brief.as_ref().unwrap().articles[0].is_favourite, Some(false));
+        assert_eq!(
+            app.current_brief.as_ref().unwrap().articles[0].is_favourite,
+            Some(false)
+        );
 
         let cur = app.current_brief.as_ref().unwrap();
         let payload = crate::publish::build_publish_payload(

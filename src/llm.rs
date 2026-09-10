@@ -740,7 +740,9 @@ pub fn ollama_client() -> reqwest::Client {
 pub async fn check_llm_provider(config: &LlmConfig) -> bool {
     match config.provider {
         ProviderType::Ollama => check_ollama(&config.ollama_url, &config.ollama_model).await,
-        ProviderType::OpenRouter => check_openrouter(&config.openrouter_url, &config.openrouter_api_key).await,
+        ProviderType::OpenRouter => {
+            check_openrouter(&config.openrouter_url, &config.openrouter_api_key).await
+        }
     }
 }
 
@@ -887,5 +889,3 @@ mod tests {
         assert_eq!(cfg, deserialized);
     }
 }
-
-

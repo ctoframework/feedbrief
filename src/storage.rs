@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::feeds::Persona;
+use crate::feeds::{FeedSource, Persona};
 use crate::fetcher::Article;
+use crate::fetcher::FeedFetchStatus;
 use crate::llm::LlmConfig;
 use crate::progress::BriefStats;
 
@@ -43,6 +44,14 @@ pub struct BriefSummary {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct FeedHealth {
+    pub source: FeedSource,
+    pub last_item_published: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub error_count: u64,
+    pub last_checked: Option<DateTime<Utc>>,
+}
 
 pub fn data_dir() -> PathBuf {
     directories::ProjectDirs::from("com", "feedbrief", "Feedbrief")
@@ -51,6 +60,44 @@ pub fn data_dir() -> PathBuf {
 }
 
 impl Storage {
+    fn migrate_json_feeds(conn: &Connection) -> Result<()> {
+        let mut personas =
+            conn.prepare("SELECT id, feeds_json, paused_feed_urls_json FROM personas")?;
+        let rows = personas.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2).unwrap_or_else(|_| "[]".to_string()),
+            ))
+        })?;
+        for row in rows {
+            let (persona_id, feeds_json, paused_json) = row?;
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM feeds WHERE persona_id = ?)",
+                params![persona_id],
+                |row| row.get(0),
+            )?;
+            if exists {
+                continue;
+            }
+            let paused: Vec<String> = serde_json::from_str(&paused_json).unwrap_or_default();
+            for feed in serde_json::from_str::<Vec<FeedSource>>(&feeds_json).unwrap_or_default() {
+                conn.execute("INSERT OR IGNORE INTO feeds (persona_id, name, url, category, active) VALUES (?, ?, ?, ?, ?)", params![persona_id, feed.name, feed.url, feed.category, if paused.iter().any(|url| url == &feed.url) { 0 } else { 1 }])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn replace_persona_feeds(&self, persona_id: i64, feeds: &[FeedSource]) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM feeds WHERE persona_id = ?",
+            params![persona_id],
+        )?;
+        for feed in feeds {
+            self.conn.execute("INSERT INTO feeds (persona_id, name, url, category, active) VALUES (?, ?, ?, ?, ?)", params![persona_id, feed.name, feed.url, feed.category, feed.active as i64])?;
+        }
+        Ok(())
+    }
     pub fn open() -> Result<Self> {
         let dir = data_dir();
         std::fs::create_dir_all(&dir).ok();
@@ -140,6 +187,32 @@ impl Storage {
                 [],
             );
         }
+        let has_paused_feeds: bool = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('personas') WHERE name='paused_feed_urls_json'",
+                [],
+                |r| Ok(r.get::<_, i64>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if personas_table_exists && !has_paused_feeds {
+            conn.execute(
+                "ALTER TABLE personas ADD COLUMN paused_feed_urls_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
+        let has_error_count: bool = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('feed_health') WHERE name='error_count'",
+                [],
+                |r| Ok(r.get::<_, i64>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_error_count {
+            let _ = conn.execute(
+                "ALTER TABLE feed_health ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
+        }
 
         conn.execute_batch(
             r#"
@@ -148,6 +221,7 @@ impl Storage {
                 name             TEXT NOT NULL UNIQUE,
                 description      TEXT NOT NULL,
                 feeds_json       TEXT NOT NULL,
+                paused_feed_urls_json TEXT NOT NULL DEFAULT '[]',
                 publish_endpoint TEXT NOT NULL DEFAULT 'http://localhost:3000/api/news-digest',
                 publish_token    TEXT NOT NULL DEFAULT 'YOUR_SECRET_KEY'
             );
@@ -171,6 +245,23 @@ impl Storage {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS feed_health (
+                persona_id          INTEGER NOT NULL,
+                feed_url            TEXT NOT NULL,
+                last_item_published TEXT,
+                last_error          TEXT,
+                error_count         INTEGER NOT NULL DEFAULT 0,
+                last_checked        TEXT NOT NULL,
+                PRIMARY KEY (persona_id, feed_url),
+                FOREIGN KEY (persona_id) REFERENCES personas(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS feeds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, persona_id INTEGER NOT NULL,
+                name TEXT NOT NULL, url TEXT NOT NULL, category TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1, UNIQUE(persona_id, url)
+            );
         "#,
         )?;
 
@@ -178,19 +269,24 @@ impl Storage {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM personas", [], |r| r.get(0))?;
         if count == 0 {
             let default_persona = Persona::default();
-            let feeds_json = serde_json::to_string(&default_persona.feeds)?;
+            let default_feeds = default_persona.feeds.clone();
             conn.execute(
-                "INSERT INTO personas (id, name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO personas (id, name, description, feeds_json, paused_feed_urls_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![
                     1,
                     default_persona.name,
                     default_persona.description,
-                    feeds_json,
+                    "[]",
+                    "[]",
                     default_persona.publish_endpoint,
                     default_persona.publish_token,
                 ],
             )?;
+            for feed in default_feeds {
+                conn.execute("INSERT INTO feeds (persona_id, name, url, category, active) VALUES (1, ?, ?, ?, 1)", params![feed.name, feed.url, feed.category])?;
+            }
         }
+        Self::migrate_json_feeds(&conn)?;
 
         Ok(Self { conn })
     }
@@ -204,6 +300,7 @@ impl Storage {
                 name             TEXT NOT NULL UNIQUE,
                 description      TEXT NOT NULL,
                 feeds_json       TEXT NOT NULL,
+                paused_feed_urls_json TEXT NOT NULL DEFAULT '[]',
                 publish_endpoint TEXT NOT NULL DEFAULT 'http://localhost:3000/api/news-digest',
                 publish_token    TEXT NOT NULL DEFAULT 'YOUR_SECRET_KEY'
             );
@@ -227,49 +324,85 @@ impl Storage {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS feed_health (
+                persona_id          INTEGER NOT NULL,
+                feed_url            TEXT NOT NULL,
+                last_item_published TEXT,
+                last_error          TEXT,
+                error_count         INTEGER NOT NULL DEFAULT 0,
+                last_checked        TEXT NOT NULL,
+                PRIMARY KEY (persona_id, feed_url),
+                FOREIGN KEY (persona_id) REFERENCES personas(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS feeds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, persona_id INTEGER NOT NULL,
+                name TEXT NOT NULL, url TEXT NOT NULL, category TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1, UNIQUE(persona_id, url)
+            );
         "#,
         )?;
 
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM personas", [], |r| r.get(0))?;
         if count == 0 {
             let default_persona = Persona::default();
-            let feeds_json = serde_json::to_string(&default_persona.feeds)?;
+            let default_feeds = default_persona.feeds.clone();
             conn.execute(
-                "INSERT INTO personas (id, name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO personas (id, name, description, feeds_json, paused_feed_urls_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![
                     1,
                     default_persona.name,
                     default_persona.description,
-                    feeds_json,
+                    "[]",
+                    "[]",
                     default_persona.publish_endpoint,
                     default_persona.publish_token,
                 ],
             )?;
+            for feed in default_feeds {
+                conn.execute("INSERT INTO feeds (persona_id, name, url, category, active) VALUES (1, ?, ?, ?, 1)", params![feed.name, feed.url, feed.category])?;
+            }
         }
+        Self::migrate_json_feeds(&conn)?;
 
         Ok(Self { conn })
     }
 
     pub fn list_personas(&self) -> Result<Vec<Persona>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, name, description, feeds_json, publish_endpoint, publish_token FROM personas ORDER BY id ASC")?;
-        let personas = stmt
+        let mut stmt = self.conn.prepare("SELECT id, name, description, publish_endpoint, publish_token FROM personas ORDER BY id ASC")?;
+        let mut personas: Vec<Persona> = stmt
             .query_map([], |row| {
-                let feeds_json: String = row.get(3)?;
-                let publish_endpoint: String = row.get(4).unwrap_or_else(|_| "http://localhost:3000/api/news-digest".to_string());
-                let publish_token: String = row.get(5).unwrap_or_else(|_| "YOUR_SECRET_KEY".to_string());
+                let publish_endpoint: String = row
+                    .get(3)
+                    .unwrap_or_else(|_| "http://localhost:3000/api/news-digest".to_string());
+                let publish_token: String =
+                    row.get(4).unwrap_or_else(|_| "YOUR_SECRET_KEY".to_string());
                 Ok(Persona {
                     id: Some(row.get(0)?),
                     name: row.get(1)?,
                     description: row.get(2)?,
-                    feeds: serde_json::from_str(&feeds_json).unwrap_or_default(),
+                    feeds: vec![],
                     publish_endpoint,
                     publish_token,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<std::result::Result<_, _>>()?;
+        for persona in &mut personas {
+            let mut feeds = self.conn.prepare(
+                "SELECT name, url, category, active FROM feeds WHERE persona_id = ? ORDER BY id",
+            )?;
+            persona.feeds = feeds
+                .query_map(params![persona.id.unwrap_or(1)], |row| {
+                    Ok(FeedSource {
+                        name: row.get(0)?,
+                        url: row.get(1)?,
+                        category: row.get(2)?,
+                        active: row.get::<_, i64>(3)? != 0,
+                    })
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+        }
         Ok(personas)
     }
 
@@ -323,33 +456,43 @@ impl Storage {
         }
 
         let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM feeds", [])?;
         tx.execute("DELETE FROM personas", [])?;
 
         for persona in archive.personas {
-            let feeds_json = serde_json::to_string(&persona.feeds)?;
+            let feeds = persona.feeds;
             if let Some(id) = persona.id {
                 tx.execute(
-                    "INSERT INTO personas (id, name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO personas (id, name, description, feeds_json, paused_feed_urls_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     params![
                         id,
                         persona.name,
                         persona.description,
-                        feeds_json,
+                        "[]",
+                        "[]",
                         persona.publish_endpoint,
                         persona.publish_token,
                     ],
                 )?;
+                for feed in feeds {
+                    tx.execute("INSERT INTO feeds (persona_id, name, url, category, active) VALUES (?, ?, ?, ?, ?)", params![id, feed.name, feed.url, feed.category, feed.active as i64])?;
+                }
             } else {
                 tx.execute(
-                    "INSERT INTO personas (name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO personas (name, description, feeds_json, paused_feed_urls_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?)",
                     params![
                         persona.name,
                         persona.description,
-                        feeds_json,
+                        "[]",
+                        "[]",
                         persona.publish_endpoint,
                         persona.publish_token,
                     ],
                 )?;
+                let id = tx.last_insert_rowid();
+                for feed in feeds {
+                    tx.execute("INSERT INTO feeds (persona_id, name, url, category, active) VALUES (?, ?, ?, ?, ?)", params![id, feed.name, feed.url, feed.category, feed.active as i64])?;
+                }
             }
         }
 
@@ -363,33 +506,96 @@ impl Storage {
     }
 
     pub fn save_persona(&self, persona: &Persona) -> Result<i64> {
-        let feeds_json = serde_json::to_string(&persona.feeds)?;
         if let Some(id) = persona.id {
             self.conn.execute(
-                "UPDATE personas SET name = ?, description = ?, feeds_json = ?, publish_endpoint = ?, publish_token = ? WHERE id = ?",
+                "UPDATE personas SET name = ?, description = ?, publish_endpoint = ?, publish_token = ? WHERE id = ?",
                 params![
                     persona.name,
                     persona.description,
-                    feeds_json,
                     persona.publish_endpoint,
                     persona.publish_token,
                     id
                 ],
             )?;
+            self.replace_persona_feeds(id, &persona.feeds)?;
             Ok(id)
         } else {
             self.conn.execute(
-                "INSERT INTO personas (name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO personas (name, description, feeds_json, paused_feed_urls_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?)",
                 params![
                     persona.name,
                     persona.description,
-                    feeds_json,
+                    "[]",
+                    "[]",
                     persona.publish_endpoint,
                     persona.publish_token
                 ],
             )?;
-            Ok(self.conn.last_insert_rowid())
+            let id = self.conn.last_insert_rowid();
+            self.replace_persona_feeds(id, &persona.feeds)?;
+            Ok(id)
         }
+    }
+
+    pub fn record_feed_status(&self, persona_id: i64, status: &FeedFetchStatus) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO feed_health (persona_id, feed_url, last_item_published, last_error, error_count, last_checked)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(persona_id, feed_url) DO UPDATE SET
+                last_item_published = COALESCE(excluded.last_item_published, feed_health.last_item_published),
+                last_error = excluded.last_error,
+                error_count = feed_health.error_count + excluded.error_count,
+                last_checked = excluded.last_checked",
+            params![
+                persona_id,
+                status.feed_url,
+                status.last_item_published.map(|date| date.to_rfc3339()),
+                status.error,
+                if status.error.is_some() { 1 } else { 0 },
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn feed_health_for_persona(&self, persona: &Persona) -> Result<Vec<FeedHealth>> {
+        let persona_id = persona.id.unwrap_or(1);
+        let mut stmt = self.conn.prepare(
+            "SELECT feed_url, last_item_published, last_error, error_count, last_checked
+             FROM feed_health WHERE persona_id = ?",
+        )?;
+        let mut rows = stmt.query(params![persona_id])?;
+        let mut recorded = std::collections::HashMap::new();
+        while let Some(row) = rows.next()? {
+            let url: String = row.get(0)?;
+            let published: Option<String> = row.get(1)?;
+            let error: Option<String> = row.get(2)?;
+            let error_count = row.get::<_, i64>(3)? as u64;
+            let checked: String = row.get(4)?;
+            recorded.insert((url, published, error, error_count, checked), ());
+        }
+        Ok(persona
+            .feeds
+            .iter()
+            .map(|source| {
+                let entry = recorded.keys().find(|(url, _, _, _, _)| url == &source.url);
+                FeedHealth {
+                    source: source.clone(),
+                    last_item_published: entry
+                        .and_then(|(_, published, _, _, _)| published.as_deref())
+                        .and_then(|date| DateTime::parse_from_rfc3339(date).ok())
+                        .map(|date| date.with_timezone(&Utc)),
+                    last_error: entry.and_then(|(_, _, error, _, _)| error.clone()),
+                    error_count: entry.map(|(_, _, _, count, _)| *count).unwrap_or(0),
+                    last_checked: entry
+                        .and_then(|(_, _, _, _, checked)| {
+                            DateTime::parse_from_rfc3339(checked).ok()
+                        })
+                        .map(|date| date.with_timezone(&Utc)),
+                }
+            })
+            .collect())
     }
 
     pub fn delete_persona(&self, id: i64) -> Result<()> {
@@ -471,7 +677,12 @@ impl Storage {
         }
     }
 
-    pub fn remove_article_by_url(&self, date: NaiveDate, persona_id: i64, url: &str) -> Result<bool> {
+    pub fn remove_article_by_url(
+        &self,
+        date: NaiveDate,
+        persona_id: i64,
+        url: &str,
+    ) -> Result<bool> {
         if let Some(mut brief) = self.load(date, persona_id)? {
             let orig_len = brief.articles.len();
             brief.articles.retain(|a| a.url != url);
@@ -492,7 +703,12 @@ impl Storage {
         Ok(false)
     }
 
-    pub fn remove_article_by_index(&self, date: NaiveDate, persona_id: i64, index: usize) -> Result<bool> {
+    pub fn remove_article_by_index(
+        &self,
+        date: NaiveDate,
+        persona_id: i64,
+        index: usize,
+    ) -> Result<bool> {
         if let Some(mut brief) = self.load(date, persona_id)? {
             if index < brief.articles.len() {
                 brief.articles.remove(index);
@@ -511,7 +727,6 @@ impl Storage {
         }
         Ok(false)
     }
-
 
     /// All dates that have a brief for a given persona, sorted ascending.
     pub fn all_dates(&self, persona_id: i64) -> Result<Vec<NaiveDate>> {
@@ -568,7 +783,6 @@ impl Storage {
         )?;
         Ok(())
     }
-
 
     pub fn previous_date(&self, current: NaiveDate, persona_id: i64) -> Result<Option<NaiveDate>> {
         let result = self.conn.query_row(
@@ -635,20 +849,28 @@ mod tests {
                 name             TEXT NOT NULL UNIQUE,
                 description      TEXT NOT NULL,
                 feeds_json       TEXT NOT NULL,
+                paused_feed_urls_json TEXT NOT NULL DEFAULT '[]',
                 publish_endpoint TEXT NOT NULL DEFAULT 'http://localhost:3000/api/news-digest',
                 publish_token    TEXT NOT NULL DEFAULT 'YOUR_SECRET_KEY'
             );
+            CREATE TABLE feeds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, persona_id INTEGER NOT NULL,
+                name TEXT NOT NULL, url TEXT NOT NULL, category TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1, UNIQUE(persona_id, url)
+            );
             "#,
-        ).unwrap();
+        )
+        .unwrap();
         let default_persona = Persona::default();
         let feeds_json = serde_json::to_string(&default_persona.feeds).unwrap();
         conn.execute(
-            "INSERT INTO personas (id, name, description, feeds_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO personas (id, name, description, feeds_json, paused_feed_urls_json, publish_endpoint, publish_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
             params![
                 1,
                 default_persona.name,
                 default_persona.description,
                 feeds_json,
+                "[]",
                 default_persona.publish_endpoint,
                 default_persona.publish_token,
             ],
@@ -687,12 +909,21 @@ mod tests {
         let personas = storage.list_personas().unwrap();
         assert_eq!(personas.len(), 3);
 
-        let found_sec = personas.iter().find(|p| p.name == "Security Researcher").unwrap();
-        assert_eq!(found_sec.publish_endpoint, "https://security-site.org/api/publish");
+        let found_sec = personas
+            .iter()
+            .find(|p| p.name == "Security Researcher")
+            .unwrap();
+        assert_eq!(
+            found_sec.publish_endpoint,
+            "https://security-site.org/api/publish"
+        );
         assert_eq!(found_sec.publish_token, "sec_secret_token_123");
 
         let found_cto = personas.iter().find(|p| p.name == "CTO Persona").unwrap();
-        assert_eq!(found_cto.publish_endpoint, "https://cto-brief.com/v1/digest");
+        assert_eq!(
+            found_cto.publish_endpoint,
+            "https://cto-brief.com/v1/digest"
+        );
         assert_eq!(found_cto.publish_token, "cto_bearer_987");
     }
 
@@ -718,8 +949,14 @@ mod tests {
         assert_eq!(imported_count, 2);
 
         let personas = storage.list_personas().unwrap();
-        let sec_imported = personas.iter().find(|p| p.name == "Security Researcher").unwrap();
-        assert_eq!(sec_imported.publish_endpoint, "https://sec.example.com/hooks/publish");
+        let sec_imported = personas
+            .iter()
+            .find(|p| p.name == "Security Researcher")
+            .unwrap();
+        assert_eq!(
+            sec_imported.publish_endpoint,
+            "https://sec.example.com/hooks/publish"
+        );
         assert_eq!(sec_imported.publish_token, "tok_sec_key");
     }
 
@@ -728,7 +965,10 @@ mod tests {
         let storage = in_memory_storage();
 
         // Save table definition for briefs
-        storage.conn.execute_batch(r#"
+        storage
+            .conn
+            .execute_batch(
+                r#"
             CREATE TABLE IF NOT EXISTS briefs (
                 date         TEXT NOT NULL,
                 persona_id   INTEGER NOT NULL DEFAULT 1,
@@ -743,7 +983,9 @@ mod tests {
                 PRIMARY KEY (date, persona_id),
                 FOREIGN KEY (persona_id) REFERENCES personas(id)
             );
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
         let d1 = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
         let d2 = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
@@ -754,8 +996,28 @@ mod tests {
             articles_kept: 10,
         };
 
-        storage.save(d1, 1, "Aug 14 Headline", "Brief text 1", &[], &stats, "ollama:llama3").unwrap();
-        storage.save(d2, 1, "Aug 15 Headline", "Brief text 2", &[], &stats, "ollama:llama3").unwrap();
+        storage
+            .save(
+                d1,
+                1,
+                "Aug 14 Headline",
+                "Brief text 1",
+                &[],
+                &stats,
+                "ollama:llama3",
+            )
+            .unwrap();
+        storage
+            .save(
+                d2,
+                1,
+                "Aug 15 Headline",
+                "Brief text 2",
+                &[],
+                &stats,
+                "ollama:llama3",
+            )
+            .unwrap();
 
         let summaries = storage.list_brief_summaries(1).unwrap();
         assert_eq!(summaries.len(), 2);
@@ -773,7 +1035,10 @@ mod tests {
     #[test]
     fn test_remove_article_from_storage() {
         let storage = in_memory_storage();
-        storage.conn.execute_batch(r#"
+        storage
+            .conn
+            .execute_batch(
+                r#"
             CREATE TABLE IF NOT EXISTS briefs (
                 date         TEXT NOT NULL,
                 persona_id   INTEGER NOT NULL DEFAULT 1,
@@ -788,7 +1053,9 @@ mod tests {
                 PRIMARY KEY (date, persona_id),
                 FOREIGN KEY (persona_id) REFERENCES personas(id)
             );
-        "#).unwrap();
+        "#,
+            )
+            .unwrap();
 
         let date = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
         let a1 = Article {
@@ -818,21 +1085,32 @@ mod tests {
             is_favourite: None,
         };
 
-
         let stats = BriefStats {
             feeds_fetched: 2,
             total_articles: 10,
             articles_kept: 2,
         };
 
-        storage.save(date, 1, "Test Headline", "Brief text", &[a1.clone(), a2.clone()], &stats, "model").unwrap();
+        storage
+            .save(
+                date,
+                1,
+                "Test Headline",
+                "Brief text",
+                &[a1.clone(), a2.clone()],
+                &stats,
+                "model",
+            )
+            .unwrap();
 
         let loaded = storage.load(date, 1).unwrap().unwrap();
         assert_eq!(loaded.articles.len(), 2);
         assert_eq!(loaded.stats.articles_kept, 2);
 
         // Remove by URL
-        let removed = storage.remove_article_by_url(date, 1, "https://example.com/1").unwrap();
+        let removed = storage
+            .remove_article_by_url(date, 1, "https://example.com/1")
+            .unwrap();
         assert!(removed);
 
         let loaded_after = storage.load(date, 1).unwrap().unwrap();
@@ -849,6 +1127,3 @@ mod tests {
         assert_eq!(loaded_final.stats.articles_kept, 0);
     }
 }
-
-
-

@@ -13,11 +13,17 @@ pub struct PipelineConfig {
 }
 
 pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent>) {
-    let sources = &cfg.persona.feeds;
+    let sources: Vec<_> = cfg
+        .persona
+        .feeds
+        .iter()
+        .filter(|feed| feed.active)
+        .cloned()
+        .collect();
     let n_feeds = sources.len();
 
     // === FETCH ===
-    let articles = fetch_all(sources, cfg.hours, &tx).await;
+    let (articles, _statuses) = fetch_all(&sources, cfg.hours, &tx).await;
     let total = articles.len();
     let _ = tx.send(ProgressEvent::Stage {
         stage: "FETCH".into(),
@@ -98,7 +104,8 @@ pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent
     if top.is_empty() {
         let _ = tx.send(ProgressEvent::Done {
             headline: "No Summaries Generated".to_string(),
-            brief: "Could not generate valid summaries for any of the fetched articles.".to_string(),
+            brief: "Could not generate valid summaries for any of the fetched articles."
+                .to_string(),
             articles: vec![],
             stats: BriefStats {
                 feeds_fetched: n_feeds,
@@ -139,4 +146,3 @@ pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent
         },
     });
 }
-
