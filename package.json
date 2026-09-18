@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "eval:summaries": "node ./node_modules/promptfoo/dist/src/entrypoint.js eval -c evals/promptfooconfig.yaml --max-concurrency 1"
+  },
+  "devDependencies": {
+    "promptfoo": "0.123.1"
+  }
+}

@@ -1,0 +1,58 @@
+description: Feedbrief article-summary prompt regressions
+prompts:
+  - file://summary.txt
+providers:
+  - id: ollama:completion:llama3.1:8b
+    config:
+      temperature: 0.2
+      num_predict: 200
+defaultTest:
+  options:
+    provider:
+      text:
+        id: ollama:chat:llama3.1:8b
+        config:
+          temperature: 0
+          num_predict: 300
+  assert:
+    - type: javascript
+      value: file://assertions/summary_format.js
+      metric: summary-format
+    - type: llm-rubric
+      threshold: 0.8
+      metric: summary-quality
+      value: |
+        Evaluate the summary against the supplied news-item content. Pass only if it is
+        factually supported by the content, identifies concrete actors, technologies,
+        numbers, or impacts when those details are present, and is useful to a chief
+        technology officer. Fail summaries that invent facts, are generic, editorialize,
+        or include conversational language.
+
+        Title: {{title}}
+        Source: {{source}}
+        Content: {{content}}
+tests:
+  - description: GPU product launch with concrete metrics
+    vars:
+      persona_name: a Chief Technology Officer
+      title: Nvidia announces Blackwell Ultra GPU platform
+      source: Example Technology News
+      content: Nvidia introduced Blackwell Ultra, a GPU platform with 288GB of HBM3e memory per GPU. The company said the platform targets inference workloads and can support larger context windows than its previous generation.
+  - description: AI infrastructure research result
+    vars:
+      persona_name: a Chief Technology Officer
+      title: Research team reduces distributed-training network traffic
+      source: Systems Research Journal
+      content: Researchers at the University of Cambridge released SwitchTrain, a technique that compresses gradient updates before they cross data-center links. In tests on a 256-GPU cluster, SwitchTrain cut network traffic by 42 percent while keeping model accuracy within 0.3 percentage points of the uncompressed baseline.
+  - description: Enterprise data policy update
+    vars:
+      persona_name: a Chief Technology Officer
+      title: European regulator publishes cloud data transfer guidance
+      source: Digital Policy Monitor
+      content: The European Data Protection Board published guidance on documenting transfers of personal data to cloud providers outside the European Economic Area. The guidance recommends maintaining a transfer inventory, assessing recipient-country laws, and applying supplementary technical controls such as encryption with customer-managed keys.
+  - description: Sparse operational announcement
+    vars:
+      persona_name: a Chief Technology Officer
+      title: Acme schedules maintenance window
+      source: Acme Status
+      content: Acme will perform database maintenance on 14 October between 01:00 and 03:00 UTC. The company expects up to 15 minutes of intermittent API unavailability during the window.

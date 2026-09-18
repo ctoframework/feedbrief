@@ -58,6 +58,17 @@ cargo build --release
 
 The first build takes longer because `eframe`, `winit`, `wgpu`, and the platform graphics stack need to compile. After that, incremental builds are much faster.
 
+## Summary Prompt Evaluations
+
+Feedbrief includes a local [Promptfoo](https://www.promptfoo.dev/) suite that checks summary formatting and uses Ollama as a quality judge. With `ollama serve` running and the default model installed, install the evaluation dependency and run:
+
+```bash
+npm ci
+npm run eval:summaries
+```
+
+The suite uses `llama3.1:8b` for both generation and grading, runs one request at a time, and does not contact a hosted provider. It verifies that summaries contain exactly two sentences with no preamble or conversational sign-off, then grades factuality and specificity against the supplied source content.
+
 ## Data Storage
 
 Feedbrief stores briefs locally in SQLite. Persona backups are written to a JSON file in the same data directory.

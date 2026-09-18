@@ -4,3 +4,4 @@ target/
 assets/*.ttf
 target
 unsloth_compiled_cache/
+node_modules/

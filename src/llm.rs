@@ -451,6 +451,19 @@ pub fn is_valid_summary(summary: &str) -> bool {
         }
     }
 
+    // A news summary must be self-contained, rather than a chat response with
+    // an invitation to continue the conversation.
+    let conversational_closings = [
+        "let me know if you need",
+        "let me know if you'd like",
+        "let me know if you would like",
+        "feel free to ask",
+        "happy to help",
+    ];
+    if conversational_closings.iter().any(|phrase| lower.contains(phrase)) {
+        return false;
+    }
+
     let is_refusal_prefix = lower.starts_with("unfortunately")
         || lower.starts_with("i'm sorry")
         || lower.starts_with("i am sorry")
@@ -559,6 +572,21 @@ pub fn strip_summary_preamble(summary: &str) -> String {
         .to_string()
 }
 
+const SUMMARY_PROMPT_TEMPLATE: &str = include_str!("../evals/summary.txt");
+
+fn render_summary_prompt(
+    persona_name: &str,
+    title: &str,
+    source: &str,
+    content: &str,
+) -> String {
+    SUMMARY_PROMPT_TEMPLATE
+        .replace("{{persona_name}}", persona_name)
+        .replace("{{title}}", title)
+        .replace("{{source}}", source)
+        .replace("{{content}}", content)
+}
+
 pub async fn summarize_article(
     client: &reqwest::Client,
     config: &LlmConfig,
@@ -570,17 +598,7 @@ pub async fn summarize_article(
         anyhow::bail!("Article content is empty; cannot summarize");
     }
 
-    let prompt = format!(
-        r#"Summarize the following news item in EXACTLY 2 sentences for {}. Be concrete: name the actors, the number, the technique, the impact. No fluff, no "in this article", no editorializing.
-Output ONLY the 2-sentence summary itself. Do NOT include any preamble, introductory text, or labels such as "Here is a 2-sentence summary" or "Summary:". Start directly with the summary text.
-
-Title: {}
-Source: {}
-Content: {}
-
-Summary:"#,
-        persona_name, article.title, article.source, body
-    );
+    let prompt = render_summary_prompt(persona_name, &article.title, &article.source, &body);
     let response = llm_call(client, config, prompt, false, 200).await?;
     let summary = strip_summary_preamble(&response);
 
@@ -825,6 +843,7 @@ mod tests {
             "Please provide the text of the article.",
             "I cannot summarize this article because no text was provided.",
             "Unfortunately, there is no text available.",
+            "Nvidia announced Blackwell GPUs. Let me know if you need summaries of other news items!",
             "   ",
             "",
         ];
@@ -862,6 +881,26 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(strip_summary_preamble(input), expected);
         }
+    }
+
+    #[test]
+    fn test_summary_prompt_template_rendering() {
+        let prompt = render_summary_prompt(
+            "a Chief Technology Officer",
+            "Nvidia launches Blackwell",
+            "Example News",
+            "The platform has 288GB of HBM3e memory.",
+        );
+
+        assert!(prompt.contains("for a Chief Technology Officer"));
+        assert!(prompt.contains("Title: Nvidia launches Blackwell"));
+        assert!(prompt.contains("Source: Example News"));
+        assert!(prompt.contains("Content: The platform has 288GB of HBM3e memory."));
+        assert!(prompt.contains("Let me know if you need summaries of other news items!"));
+        assert!(!prompt.contains("{{persona_name}}"));
+        assert!(!prompt.contains("{{title}}"));
+        assert!(!prompt.contains("{{source}}"));
+        assert!(!prompt.contains("{{content}}"));
     }
 
     #[test]

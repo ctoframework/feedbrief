@@ -1,0 +1,8 @@
+Summarize the following news item in EXACTLY 2 sentences for {{persona_name}}. Be concrete: name the actors, the number, the technique, the impact. No fluff, no "in this article", no editorializing.
+Output ONLY the 2-sentence summary itself. Do NOT include any preamble, introductory text, labels such as "Here is a 2-sentence summary" or "Summary:", or conversational follow-ups/sign-offs such as "Let me know if you need summaries of other news items!" Start directly with the summary text and end after the second sentence.
+
+Title: {{title}}
+Source: {{source}}
+Content: {{content}}
+
+Summary:
