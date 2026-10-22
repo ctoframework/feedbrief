@@ -5,9 +5,9 @@ edition = "2024"
 
 [dependencies]
 # UI
-eframe = { version = "=0.36.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
-egui = "=0.36.1"
-egui_extras = { version = "=0.36.1", features = ["all_loaders"] }
+eframe = { version = "=0.37.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "=0.37.0"
+egui_extras = { version = "=0.37.0", features = ["all_loaders"] }
 
 # Async
 tokio = { version = "1", features = ["full"] }
