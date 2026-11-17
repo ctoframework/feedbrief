@@ -3018,6 +3018,8 @@ fn configure_fonts(ctx: &egui::Context) {
         .cloned()
         .unwrap_or_default();
 
+    let default_prop_fallback = default_prop.clone();
+
     if has_serif {
         fonts
             .families
@@ -3066,6 +3068,20 @@ fn configure_fonts(ctx: &egui::Context) {
             .entry(FontFamily::Monospace)
             .or_default()
             .insert(0, "mono".into());
+    }
+
+    // Custom families only contain Fraunces; append the default fonts so
+    // symbols and emoji (⚙ 📰 🗑 ★ …) fall back to egui's bundled icon fonts.
+    for name in ["serif", "serif-bold", "serif-italic"] {
+        let family = fonts
+            .families
+            .entry(FontFamily::Name(name.into()))
+            .or_default();
+        for f in &default_prop_fallback {
+            if !family.contains(f) {
+                family.push(f.clone());
+            }
+        }
     }
 
     ctx.set_fonts(fonts);

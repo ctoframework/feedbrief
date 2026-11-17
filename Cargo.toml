@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 # UI
 eframe = { version = "=0.37.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
-egui = "=0.37.0"
+egui = { version = "=0.37.0", features = ["monochrome_emoji_fonts"] }
 egui_extras = { version = "=0.37.0", features = ["all_loaders"] }
 
 # Async
@@ -15,13 +15,13 @@ futures = "0.3"
 
 # HTTP & feeds
 reqwest = { version = "0.13", features = ["json", "default-tls"], default-features = false }
-feed-rs = "2"
+feed-rs = "3"
 
 # Data
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
+rusqlite = { version = "0.43", features = ["bundled", "chrono"] }
 
 # Utility
 anyhow = "1"
